@@ -2,7 +2,7 @@ import * as THREE from 'three/webgpu';
 import { attribute, texture, uv, vec2 } from 'three/tsl';
 import { buildRoadNetwork } from './road-network.js';
 import { createPedestrianRoutes } from './pedestrian-routes.js';
-import { signalPhase, walkSignal, blockAt, WORLD_BOUNDS } from './city-config.js';
+import { signalPhase, walkSignal, blockAt, WORLD_BOUNDS, FEATURES } from './city-config.js';
 import { terrainActive, terrainY, bridgeAt } from './terrain.js';
 import { cityUniforms, createContactShadowMaterial, createCarFlareMaterial } from './tsl-materials.js';
 import { HEADLIGHTS, createVehicleHeadlight, placeVehicleHeadlight } from './vehicle-lights.js';
@@ -15,6 +15,7 @@ import {
   createLoftedCarMaterial,
   buildLightbarGeometry,
   createLightbarMaterial,
+  createLightbarMesh,
   buildLoftedBusBodyGeometry,
   buildBusSignGeometry,
   buildBusWheelGeo,
@@ -216,11 +217,15 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
   let suvCount = 0;
   let policeCount = 0;
 
+  let mossosCount = 0;
   for (let i = 0; i < NUM_CARS; i++) {
-    // Fleet mix: a Policia Municipal car every 60th, a taxi every 9th (fewer than Manhattan's yellow cabs)
+    // Fleet mix: a police car every 60th (with FEATURES.emergencyStates alternating Policia Municipal de Terrassa, a white
+    // saloon with the chequered band, and Mossos d'Esquadra, a white SUV with the dark-blue band), a taxi every 9th
+    // (fewer than Manhattan's yellow cabs). corps: 0 none, 1 Policia Municipal, 2 Mossos (the material's carState.w)
     const isPolice = (i % 60) === 6;
+    const corps = isPolice ? (FEATURES.emergencyStates && Math.floor(i / 60) % 2 === 1 ? 2 : 1) : 0;
     const isTaxi = !isPolice && (i % 9) === 0;
-    const isSUV = !isPolice && !isTaxi && (i % 2 === 0);
+    const isSUV = corps === 2 || (!isPolice && !isTaxi && (i % 2 === 0));
 
     let bodyType = 'sedan';
     let col;
@@ -232,7 +237,8 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
     } else if (isSUV) {
       bodyType = 'suv';
       suvCount++;
-      col = suvPalette[i % suvPalette.length];
+      col = isPolice ? policeWhite : suvPalette[i % suvPalette.length];
+      if (isPolice) mossosCount++;
     } else {
       sedanCount++;
       col = isPolice ? policeWhite : sedanPalette[i % sedanPalette.length];
@@ -242,7 +248,12 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
     const car = createVehicle(false, isSUV ? 2.3 : 2.25, isSUV ? 0.92 : 0.86, isSUV ? 1.4 : 1.38, CAR_DRIVER, 10 + (i % 5) * 0.9);
     // paint as float32 values, so renderCar() can tell whether an instance slot's paint changes by comparing
     const paint = [Math.fround(col.r), Math.fround(col.g), Math.fround(col.b)];
-    Object.assign(car, { isTaxi, isPolice, isSUV, bodyType, paint });
+    // Police states (FEATURES.emergencyStates): on patrol by default (no lights, no siren, obeys the signals); an
+    // emergency run (updateEmergencies) lights the bar, sounds the siren and gives it right of way (`priority`, what the
+    // driving rules below check). Without the feature every police car runs as the original did: lit, siren on
+    const emergency = isPolice && !FEATURES.emergencyStates;
+    // the siren each force runs on an emergency (audio-synthesis.js): the Policia Municipal the two-tone, the Mossos the wail
+    Object.assign(car, { isTaxi, isPolice, corps, isSUV, bodyType, paint, emergency, siren: emergency, priority: emergency, emergencyTimer: 0, sirenKind: corps === 2 ? 'siren-wail' : 'siren' });
     cars.push(car);
   }
 
@@ -296,13 +307,17 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
     }
   }
 
-  // Policia Municipal roof light bars (the chequered livery is painted by the sedan material from the instance's carState)
-  const policeLightbarInst = new THREE.InstancedMesh(buildLightbarGeometry(BODY_SPECS.sedan), createLightbarMaterial(), Math.max(1, policeCount));
+  // Police roof light bars (the liveries are painted by the car materials from the instance's carState): one instanced
+  // mesh per body loft, the Policia Municipal saloons' and the Mossos SUVs', each instance lit only on an emergency run
+  // (the `barLit` attribute createLightbarMaterial reads)
+  const policeLightbarInst = createLightbarMesh(BODY_SPECS.sedan, policeCount);
+  const mossosLightbarInst = createLightbarMesh(BODY_SPECS.suv, mossosCount);
   const carShadowInst = new THREE.InstancedMesh(unitPlane, contactShadowMat, NUM_CARS);
   carShadowInst.renderOrder = 998;
 
   for (const m of bodyMeshes) m.castShadow = m.receiveShadow = true;
   policeLightbarInst.castShadow = true;
+  mossosLightbarInst.castShadow = true;
   carWheelLeftInst.castShadow = carWheelLeftInst.receiveShadow = true;
   carWheelRightInst.castShadow = carWheelRightInst.receiveShadow = true;
 
@@ -311,7 +326,8 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
     carWheelLeftInst,
     carWheelRightInst,
     sparkInst,
-    policeLightbarInst
+    policeLightbarInst,
+    mossosLightbarInst
   );
 
   // =========================================================================
@@ -441,7 +457,7 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
   }
 
   // Nothing shows until it has been placed
-  const carInstances = [...bodyMeshes, carWheelLeftInst, carWheelRightInst, policeLightbarInst, carShadowInst];
+  const carInstances = [...bodyMeshes, carWheelLeftInst, carWheelRightInst, policeLightbarInst, mossosLightbarInst, carShadowInst];
   const busInstances = [busBodyInst, busHeaderInst, busWheelLeftInst, busWheelRightInst, busShadowInst];
   for (const inst of [...carInstances, ...busInstances, sparkInst]) {
     inst.frustumCulled = false;
@@ -696,7 +712,7 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
 
   // Braking for a red (or an amber with room to stop) at the end of edge f, `d` metres ahead
   function signalAhead(v, f, d) {
-    if (v.isPolice || !f.to.signal || d > LOOKAHEAD) return 0;
+    if (v.priority || !f.to.signal || d > LOOKAHEAD) return 0;
     const phase = phaseOf(f);
     if (phase === 'green' || (phase === 'amber' && !canStopBefore(v, d))) return 0;
     return stopAt(v, d);
@@ -752,7 +768,7 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
     for (const list of o.occ) {
       const lead = leadOf(list);
       if (!lead || (lead.v.edge === o && lead.v.move.turn === 'L')) continue;
-      if (red && !lead.v.isPolice) continue;
+      if (red && !lead.v.priority) continue;
       if (!canStop(lead, o, impatient)) return true;
       const u = lead.v;
       const j = u.edge === o ? u.move.out[u.lane] : -1;
@@ -911,7 +927,7 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
       }
       return false;
     }
-    if (!v.isPolice && (phase === 'red' || (phase === 'amber' && stoppable))) return false;
+    if (!v.priority && (phase === 'red' || (phase === 'amber' && stoppable))) return false;
     if (boxBusy(n, e.axisIndex)) return false; // crossing traffic inside
     const lead = ahead(e.occ[v.lane], v.s, v);
     if (lead && lead.v.yielding) return false; // the vehicle ahead waits inside to turn: wait behind the line
@@ -920,11 +936,11 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
     // road it turns into (they walk on the same green): short of their crosswalk or, turning left across oncoming
     // traffic, short of the oncoming lanes until there is a gap. The light changing stops both for it at the latest.
     const c = connector(e, v.lane, f, j);
-    const first = n.signal && (!v.isPolice || phase === 'green') && m.turn !== 'S' && !lead;
+    const first = n.signal && (!v.priority || phase === 'green') && m.turn !== 'S' && !lead;
     const across = m.turn === 'L' && !!e.opposite;
     const wait = first ? (across ? yieldPoint(v, c, e) : c.len - 3 - v.half) : -1; // < 0: no room inside to wait
     if (m.turn === 'L' ? across && wait < 0 && yieldOncoming(e.opposite, v.wait > 8, v) : e.opposite && e.opposite.lefts > 0) return false;
-    if ((n.signal ? v.isPolice && phase !== 'green' : e.axisIndex !== 0) && yieldToCrossTraffic(v, n)) return false;
+    if ((n.signal ? v.priority && phase !== 'green' : e.axisIndex !== 0) && yieldToCrossTraffic(v, n)) return false;
     // nobody on the crosswalks while it passes over them, on the way in and on the way out, and a free place to
     // clear the intersection to, taking turns with lanes merging into it
     if (pedestrianOn(n, e.inSide, laneCoord(e, v.lane), 0, timeTo(v, d + 2.5 + 2 * v.half))) return false;
@@ -1036,7 +1052,7 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
         const o = c && !v.claimed && mergingAhead(v, f, j);
         if (o) worst = Math.min(worst, Math.max(-v.driver.b, brake(v, o.s - o.v.half - vs - v.half, o.v.speed)));
         let vt = c ? bendSpeed(v, c) : Infinity;
-        const cautious = e.to.signal ? v.isPolice && phaseOf(e) !== 'green' : e.axisIndex !== 0;
+        const cautious = e.to.signal ? v.priority && phaseOf(e) !== 'green' : e.axisIndex !== 0;
         if (cautious) vt = Math.min(vt, 5);
         cap = Math.sqrt(vt * vt + 5 * Math.max(0, d));
       }
@@ -1697,6 +1713,8 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
   let wheelCars = 0;
   let visibleCars = 0;
   let policeDrawn = 0;
+  let mossosDrawn = 0;
+  const dirtyBars = new Set();
   let visibleBuses = 0;
   let updates = 0;
 
@@ -1771,7 +1789,17 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
     dummy.scale.set(1, 1, 1);
     dummy.updateMatrix();
     bodyInst.setMatrixAt(slot, dummy.matrix);
-    if (c.isPolice) policeLightbarInst.setMatrixAt(policeDrawn++, dummy.matrix);
+    if (c.isPolice) {
+      const bar = c.corps === 2 ? mossosLightbarInst : policeLightbarInst;
+      const barSlot = c.corps === 2 ? mossosDrawn++ : policeDrawn++;
+      bar.setMatrixAt(barSlot, dummy.matrix);
+      const lit = bar.geometry.attributes.barLit;
+      const on = c.emergency ? 3 : 0; // bar mode (actor-models.js createLightbarMaterial): 3 = emergència on a run
+      if (lit.array[barSlot] !== on) {
+        lit.array[barSlot] = on;
+        dirtyBars.add(bar);
+      }
+    }
 
     const attrs = bodyInst.geometry.attributes;
     const paint = attrs.paintColor.array;
@@ -1788,7 +1816,7 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
     const b0 = c.acc < -0.8 || c.speed < 0.3 ? 1 : 0;
     const b1 = blinkOn && c.blink < 0 ? 1 : 0;
     const b2 = blinkOn && c.blink > 0 ? 1 : 0;
-    const b3 = c.isPolice ? 1 : 0;
+    const b3 = c.corps || 0;
     if (state[o4] !== b0 || state[o4 + 1] !== b1 || state[o4 + 2] !== b2 || state[o4 + 3] !== b3) {
       state[o4] = b0;
       state[o4 + 1] = b1;
@@ -1936,7 +1964,7 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
     let policeLightsUsed = 0;
     for (let i = 0; i < litVehicleCount && policeLightsUsed < POLICE_LIGHT_POOL_SIZE; i++) {
       const v = litVehicles[i];
-      if (!v.isPolice || v._effDist >= 88) continue;
+      if (!v.emergency || v._effDist >= 88) continue;
       const fade = smoothDistFade(v._effDist, 52, 88);
       if (fade <= 0.001) continue;
       const wave = Math.sin((clock + v.blinkPhase) * Math.PI * 6.0);
@@ -1970,7 +1998,9 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
   // Every rig's gait advances every frame; only those the camera may see (or whose shadow it may see) solve their
   // bone transforms and are drawn, the far ones with the light LOD.
   function renderPed(p, dt) {
-    const draw = !hasView || visible(p.x, p.z, 7);
+    // the frustum test at the pedestrian's real height (the relief): tested at y = 1 they vanished close to the camera
+    // wherever the ground is not at 0, as the cars did before groundPose()
+    const draw = !hasView || visible(p.x, p.z, 7, pedGround(p, p.x, p.z) + 1);
     const partner = p.conversation && (p.conversation.a === p ? p.conversation.b : p.conversation.a);
     const heading = partner ? Math.atan2(partner.x - p.x, partner.z - p.z) : Math.atan2(p.ux * p.dir, p.uz * p.dir);
     p.rig.update(dt, p.x, p.z, heading, pedGround, p, 0, draw);
@@ -2020,6 +2050,32 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
   let vehicleCursor = 0;
   let pedCursor = 0;
 
+  // Police states (FEATURES.emergencyStates): everyone patrols, bar dark and no siren. Nothing starts a run on its own
+  // (the owner's choice, 2026-10-25): startEmergency() below sends the nearest patrol car on a 40-90 s run (bar lit,
+  // siren, right of way at the signals) when asked from the console or a test
+  function updateEmergencies(dt) {
+    if (!FEATURES.emergencyStates) return;
+    for (const v of cars) {
+      if (!v.isPolice || !v.emergency) continue;
+      v.emergencyTimer -= dt;
+      if (v.emergencyTimer <= 0 || !v.edge) v.emergency = v.siren = v.priority = false;
+    }
+  }
+
+  function startEmergency() {
+    let best = null, bestD = Infinity;
+    for (const v of cars) {
+      if (!v.isPolice || !v.edge || v.emergency) continue;
+      const d = Math.hypot(v.x - focusX, v.z - focusZ);
+      if (d > 60 && d < 450 && d < bestD) { best = v; bestD = d; }
+    }
+    if (best) {
+      best.emergency = best.siren = best.priority = true;
+      best.emergencyTimer = 40 + Math.random() * 50;
+    }
+    return !!best;
+  }
+
   function update(dt, elapsed, focusPos = null, playerEntity = null, activeMode = 'car', camera = null) {
     clock = elapsed;
     avePhase = signalPhase(elapsed, true);
@@ -2045,8 +2101,9 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
       player.vx = Math.sin(heading) * speed + (playerEntity.vx || 0);
       player.vz = Math.cos(heading) * speed + (playerEntity.vz || 0);
     }
-    player.halfW = activeMode === 'cyclist' ? 0.35 : activeMode === 'person' ? 0.32 : 0.86;
-    player.halfL = activeMode === 'cyclist' ? 0.85 : activeMode === 'person' ? 0.32 : 2.18;
+    // the car's extents come from its catalogue vehicle (controllers.js: a SUV is wider & longer than the taxi)
+    player.halfW = activeMode === 'cyclist' ? 0.35 : activeMode === 'person' ? 0.32 : (playerEntity && playerEntity.halfW) || 0.86;
+    player.halfL = activeMode === 'cyclist' ? 0.85 : activeMode === 'person' ? 0.32 : (playerEntity && playerEntity.halfL) || 2.18;
     player.push = activeMode === 'cyclist' ? 0.82 : activeMode === 'person' ? 0.88 : 0.50;
 
     // 1. Cars & buses
@@ -2061,12 +2118,14 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
       budget--;
       spawnVehicle(v, jump ? 0 : 100, NEAR_RADIUS, !jump);
     }
+    updateEmergencies(dt);
     buildOccupancy();
     for (const m of bodyMeshes) m.count = 0;
     litVehicleCount = 0;
     wheelCars = 0;
     visibleCars = 0;
     policeDrawn = 0;
+    mossosDrawn = 0;
     visibleBuses = 0;
     for (let i = 0; i < vehicles.length; i++) {
       const v = vehicles[i];
@@ -2121,6 +2180,9 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
     syncInst(carWheelLeftInst, wheelCars * 2);
     syncInst(carWheelRightInst, wheelCars * 2);
     syncInst(policeLightbarInst, policeDrawn);
+    syncInst(mossosLightbarInst, mossosDrawn);
+    for (const bar of dirtyBars) flagRange(bar.geometry.attributes.barLit, bar.count);
+    dirtyBars.clear();
     syncInst(carShadowInst, visibleCars);
     syncInst(busBodyInst, visibleBuses);
     syncInst(busHeaderInst, visibleBuses);
@@ -2170,6 +2232,7 @@ function createTrafficSystem(scene, sidewalks, obstacles) {
     update,
     peds, // for the smoke test's floating-people check (tools/browser-smoke.mjs)
     setCollisionListener,
+    startEmergency,
     cars,
     buses,
     peds,

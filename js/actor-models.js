@@ -892,35 +892,97 @@ function buildLightbarGeometry(spec = BODY_SPECS.sedan) {
 
 let _lightbarMat = null;
 
-// Light bar lenses: Spanish police bars are all blue (no red); the left & right halves flash in alternation (double
-// strobes), each car on its own phase
+// Light bar patterns, shared by the lens shader (createLightbarMaterial) and the player's point lights
+// (controllers.js updateCarLights). Spanish police bars are all blue (no red). The bar reads as eight LED modules,
+// four a side, numbered 0..7 from the car's left (+x). The modes follow the ones of the real bars (Policia Local,
+// Mossos d'Esquadra) with flash times a human eye resolves (a 31 Hz stutter, the first attempt, read as a dim glow):
+//   0 off (dark lenses: a patrol)
+//   1 posició: every module steady, dimmed (parked at a scene, a slow escort)
+//   2 prioritari: the halves alternate at 1 Hz, each a double flash (90 ms on, 90 off, 90 on): the "pont alternant"
+//   3 emergència: 1.25 Hz (800 ms); the outer pairs give a triple flash (60 ms on / 60 off) in the first 400 ms, the
+//     inner pairs in the second 400 ms. Nothing else on top: a sweep ran over it at another rate and the eye lost the
+//     pattern ("se confunde, parece desordenado")
+//   4 escombrat: one module runs end to end and back in 1.2 s (the "traffic advisor" of a parked unit)
+// LIGHTBAR_PATTERN(mode, t) gives the brightness of each half for the point lights; the shader does the same per module.
+function lightbarHalf(mode, t, side) {
+  // side: 0 the car's left (modules 0-3), 1 its right (modules 4-7); returns 0..1
+  if (mode === 1) return 0.45;
+  if (mode === 2) {
+    const f = t % 1;
+    const inHalf = side === 0 ? f < 0.5 : f >= 0.5;
+    const u = (f % 0.5) / 0.5; // 0..1 inside the half: on 0-0.18, off 0.18-0.36, on 0.36-0.54
+    return inHalf && (u < 0.18 || (u >= 0.36 && u < 0.54)) ? 1 : 0;
+  }
+  if (mode === 3) {
+    const f = (t * 1.25) % 1;
+    const u = (f % 0.5) / 0.5; // 0..1 over a 400 ms half: three flashes of 60 ms on / 60 off, then 100 ms rest
+    const on = u < 0.9 && (u % 0.3) < 0.15;
+    return on ? 1 : 0; // both halves carry a flashing pair in each half-cycle (outer, then inner)
+  }
+  if (mode === 4) {
+    const f = (t / 1.2) % 1;
+    const pos = f < 0.5 ? f * 2 : 2 - f * 2; // 0..1..0 across the bar
+    return (side === 0 ? pos < 0.5 : pos >= 0.5) ? 0.6 : 0;
+  }
+  return 0;
+}
+const LIGHTBAR_PATTERN = (mode, t) => [lightbarHalf(mode, t, 0), lightbarHalf(mode, t, 1)];
+
 function createLightbarMaterial() {
   if (_lightbarMat) return _lightbarMat;
   const mat = new THREE.MeshStandardNodeMaterial({ roughness: 0.18, metalness: 0.1 });
   const lightbar = () => {
+    const one = float(1.0);
     const p = attribute('position', 'vec3');
     const partId = attribute('partId', 'float');
+    const mode = attribute('barLit', 'float');
     const isLens = step(abs(partId.sub(CAR_PARTS.SIGN)), 0.25);
     const phase = fract(float(instanceIndex).mul(0.61803)).toVar();
-    const t = fract(time.mul(1.6).add(phase)).toVar();
-    const strobe = step(0.5, fract(t.mul(6.0)));
-    const leftOn = step(t, 0.5).mul(strobe);
-    const rightOn = step(0.5, t).mul(strobe);
-    const isLeft = step(p.x, -0.035);
-    const isRight = step(0.035, p.x);
-    return { isLens, leftOn, rightOn, isLeft, isRight };
+    const t = time.add(phase.mul(3.0)).toVar();
+    // module 0..7 along the bar (p.x spans -0.56..0.56), with a 1 cm dark seam between modules
+    const across = p.x.add(0.56).div(1.12).mul(8.0);
+    const module = clamp(floor(across), 0.0, 7.0);
+    const seam = step(0.07, fract(across)).mul(step(fract(across), 0.93));
+    const left = step(module, 3.5); // modules 0-3 are on +x (the car's left)
+    const outer = step(module, 1.5).add(step(5.5, module)); // 0,1 and 6,7
+    const inner = one.sub(outer);
+    // 1 posició
+    const steady = float(0.45);
+    // 2 prioritari: 1 Hz, the halves alternate, double flash (on 0-0.18, off, on 0.36-0.54 of each half)
+    const f2 = fract(t);
+    const u2 = fract(f2.mul(2.0));
+    const dbl = step(u2, 0.18).add(step(0.36, u2).mul(step(u2, 0.54)));
+    const alt = left.mul(step(f2, 0.5)).add(one.sub(left).mul(step(0.5, f2))).mul(dbl);
+    // 3 emergència: 1.25 Hz, triple flash (60 ms on / 60 off) outer pairs first half, inner pairs second half
+    const f3 = fract(t.mul(1.25));
+    const u3 = fract(f3.mul(2.0));
+    const triple = step(u3, 0.9).mul(step(fract(u3.mul(1.0 / 0.3)), 0.5));
+    const emergency = outer.mul(step(f3, 0.5)).add(inner.mul(step(0.5, f3))).mul(triple);
+    // 4 escombrat: one lit module runs end to end and back over 1.2 s
+    const f4 = fract(t.div(1.2));
+    const pos4 = mix(f4.mul(2.0), float(2.0).sub(f4.mul(2.0)), step(0.5, f4)).mul(7.0);
+    const sweep = step(abs(module.sub(pos4)), 0.55).mul(0.8);
+    const on = mix(mix(mix(mix(float(0.0), steady, step(0.5, mode)), alt, step(1.5, mode)), emergency, step(2.5, mode)), sweep, step(3.5, mode));
+    return { isLens, seam, on: on.mul(seam), module, left };
   };
   mat.colorNode = Fn(() => {
     const s = lightbar();
-    const lens = mix(color(0xd8dde2), color(0x0f3c9a), max(s.isLeft, s.isRight));
+    const lens = mix(color(0x0d2f78), color(0x1b4cb8), s.seam);
     return mix(color(0x15181b), lens, s.isLens);
   })();
   mat.emissiveNode = Fn(() => {
     const s = lightbar();
-    return color(0x2a6cff).mul(s.isLeft.mul(s.leftOn).add(s.isRight.mul(s.rightOn)).mul(7.0)).mul(s.isLens);
+    return color(0x3d82ff).mul(s.on.mul(7.0)).mul(s.isLens);
   })();
   _lightbarMat = mat;
   return mat;
+}
+
+// A light bar instanced mesh (one or many) carrying the `barLit` attribute createLightbarMaterial reads
+function createLightbarMesh(spec, count = 1) {
+  const geo = buildLightbarGeometry(spec);
+  geo.setAttribute('barLit', new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, count)), 1));
+  return new THREE.InstancedMesh(geo, createLightbarMaterial(), Math.max(1, count));
 }
 
 // Filter-width anti-aliased 2D rounded rectangle SDF (ported from CarGenerator.js)
@@ -1020,6 +1082,58 @@ function carPlateTexture() {
   _carPlateTexture = new THREE.CanvasTexture(canvas);
   _carPlateTexture.colorSpace = THREE.SRGBColorSpace;
   return _carPlateTexture;
+}
+
+// The lettering of the liveries: one canvas atlas with each word on its own row, white on black, scaled to fill the
+// row's width; the material samples it with UVs built from the car's own coordinates (see word() below), so the words
+// are real glyphs at their real size rather than dashes. Each row records its UV band & aspect (width / height).
+const LIVERY_WORDS = [
+  ['mossos', "mossos d'esquadra", '700', 1.0],
+  ['policia', 'policia', '700', 1.0],
+  ['pm1', 'policia municipal', '700', 1.0],
+  ['pm2', 'Ajuntament de Terrassa', '500', 1.0],
+  ['terrassa', 'Terrassa', '500', 1.0],
+  ['taxi', 'TAXI 16', '700', 1.0],
+  ['mossoscat', 'www.mossos.cat', '600', 1.0]
+];
+let _liveryText = null;
+function liveryTextAtlas() {
+  if (_liveryText) return _liveryText;
+  const W = 1024;
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  const font = (weight, px) => `${weight} ${px}px "Inter", "Helvetica Neue", Arial, sans-serif`;
+  // measure each word at 100 px to size its row so the word spans the width (with a 2 % margin either side)
+  const rows = LIVERY_WORDS.map(([key, text, weight]) => {
+    ctx.font = font(weight, 100);
+    const m = ctx.measureText(text);
+    const scale = (W * 0.96) / Math.max(1, m.width);
+    const px = 100 * scale;
+    const height = Math.ceil(px * 1.3);
+    return { key, text, weight, px, height };
+  });
+  const H = rows.reduce((sum, r) => sum + r.height, 0);
+  canvas.width = W;
+  canvas.height = H;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const words = {};
+  let top = 0;
+  for (const r of rows) {
+    ctx.font = font(r.weight, r.px);
+    ctx.fillText(r.text, W / 2, top + r.height * 0.52);
+    // UV band (flipY: v = 1 at the canvas top), aspect of the row
+    words[r.key] = { v0: 1 - (top + r.height) / H, v1: 1 - top / H, aspect: W / r.height };
+    top += r.height;
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.anisotropy = 4;
+  _liveryText = { tex, words };
+  return _liveryText;
 }
 
 /**
@@ -1204,46 +1318,179 @@ function createLoftedCarMaterial(spec, fixedColorHex = null) {
   );
 
   // ---- Colour ---------------------------------------------------------------------------------------------------
-  // Liveries: Policia Municipal de Terrassa (white car, a blue & yellow chequered band along the doors with a thin
-  // blue pinstripe above it and blue lettering on the front doors); the Terrassa taxi's diagonal red & blue stripe on
-  // the front doors, its "TAXI" lettering and licence number
-  const isPolice = step(0.5, state.w).mul(isSide).mul(isBody);
-  const doorMid = (spec.doors[0] + spec.doors[1]) / 2;
-  const along = smoothstep(spec.zRear + 0.22, spec.zRear + 0.3, p.z).mul(smoothstep(spec.zFront - 0.28, spec.zFront - 0.36, p.z));
-  const band = smoothstep(0.495, 0.5, p.y).mul(smoothstep(0.645, 0.64, p.y)).mul(along);
-  // Two rows of 7 cm squares: the parity of (column + row) picks blue or yellow
-  const checker = step(0.25, fract(floor(p.z.mul(14.0)).add(floor(p.y.sub(0.5).mul(14.0))).mul(0.5)));
-  const pin = smoothstep(0.663, 0.667, p.y).mul(smoothstep(0.687, 0.683, p.y)).mul(along);
-  const lettering = step(0.45, sin(p.z.mul(70.0)))
-    .mul(smoothstep(0.725, 0.73, p.y))
-    .mul(smoothstep(0.81, 0.805, p.y))
-    .mul(step(abs(p.z.sub(doorMid)), 0.22));
-  const policeBlue = color(0x1d3f8f);
-  const policeYellow = color(0xf2c21b);
-  let painted = mix(paint, mix(policeBlue, policeYellow, checker), band.mul(isPolice));
-  painted = mix(painted, policeBlue, max(pin, lettering).mul(isPolice));
+  // Liveries, painted from photographs of the real fleets (sources in HOW_TO_IMPROVE.md §5.1, 2026-10-25):
+  //  - carState.w = 1, Policia Municipal de Terrassa (the Toyota Prius+ fleet of 2019): white car; both doors in deep
+  //    blue from the belt line to the sill, "Policia Municipal" over "Ajuntament de Terrassa" in white on the front door,
+  //    a white & light-blue diamond chequer on the rear door; a fluorescent yellow-green stripe along the sills;
+  //    "policia" in blue across the bonnet; blue light bar.
+  //  - carState.w = 2, Mossos d'Esquadra (SEAT Ateca / Arona, the corporate image of 2020): white car; navy bonnet with
+  //    "policia" in white and a red & white chequer along its front edge; a navy band under the windows from the front
+  //    wing to the tail, cut by two slanted white blocks each with a red slanted stripe, "policia" small in white on the
+  //    wing; "mossos d'esquadra" in blue across both doors; a red & white chequered band along the sills; blue bar.
+  //  - spec.sign, the Terrassa taxi (fleet photos 2019-2022): plain white; a stair of small red squares high on the
+  //    front door and low on the rear quarter; the city crest with "Terrassa / TAXI nn" in black on the front door; roof
+  //    sign. (Earlier builds painted an invented red & blue diagonal stripe: wrong, replaced.)
+  const isTop = smoothstep(0.5, 0.78, n.y).mul(isBody);
+  const sideBody = isSide.mul(isBody);
+  const [doorF, doorM, doorR] = spec.doors; // front door front edge, B pillar, rear door rear edge
+  const frontDoorMid = (doorF + doorM) / 2;
+  const doorsSpan = step(doorR - 0.01, p.z).mul(step(p.z, doorF + 0.01));
+  const frontDoor = step(doorM, p.z).mul(step(p.z, doorF + 0.01));
+  const rearDoor = step(doorR - 0.01, p.z).mul(step(p.z, doorM));
+  const panelY = smoothstep(sillY + 0.03, sillY + 0.05, p.y).mul(smoothstep(0.0, -0.015, p.y.sub(belt))); // sill..belt
+  const alongSide = smoothstep(spec.zRear + 0.12, spec.zRear + 0.2, p.z).mul(smoothstep(spec.zFront - 0.2, spec.zFront - 0.28, p.z));
+  const outsideArch = step(archR + 0.03, wheelDist);
+  const bandY = (y0, y1) => smoothstep(y0 - 0.006, y0 + 0.006, p.y).mul(smoothstep(y1 + 0.006, y1 - 0.006, p.y));
+  let painted = paint;
+  // Real lettering from the text atlas. On the sides a word spans z0..z1 (rear to front) standing on yBottom, its height
+  // from the row's aspect, read left to right from either side: facing the car's left side (+x) the nose is on the
+  // viewer's left, so there the word runs from the front backwards; on the right side from the rear forwards (checked
+  // on screen, 2026-10-25). On the bonnet it spans the car's width, read from the front (-x on the viewer's left)
+  const atlas = liveryTextAtlas();
+  const wordSide = (key, z0, z1, yBottom) => {
+    const w = atlas.words[key];
+    const h = (z1 - z0) / w.aspect;
+    const uFwd = p.z.sub(z0).div(z1 - z0);
+    const u = mix(uFwd, one.sub(uFwd), step(0.0, p.x));
+    const v = p.y.sub(yBottom).div(h);
+    const inside = step(0.0, u).mul(step(u, 1.0)).mul(step(0.0, v)).mul(step(v, 1.0));
+    return texture(atlas.tex, vec2(u, v.mul(w.v1 - w.v0).add(w.v0))).r.mul(inside);
+  };
+  // On the bonnet the word reads from the FRONT of the car (the photographs of the Mossos' Arona and Altea: someone
+  // facing the car reads "policia"): the top of the letters towards the windscreen, the viewer's left is the car's
+  // right (-x). zNose is where the bottom of the letters sits (the nose side). (The first version read from the
+  // driver's seat: the owner saw it mirrored.)
+  const wordBonnet = (key, halfWidth, zNose) => {
+    const w = atlas.words[key];
+    const h = (halfWidth * 2) / w.aspect;
+    const u = p.x.add(halfWidth).div(halfWidth * 2);
+    const v = float(zNose).sub(p.z).div(h);
+    const inside = step(0.0, u).mul(step(u, 1.0)).mul(step(0.0, v)).mul(step(v, 1.0));
+    return texture(atlas.tex, vec2(u, v.mul(w.v1 - w.v0).add(w.v0))).r.mul(inside);
+  };
+  // On the tail the word reads from behind the car: the viewer's left is the car's left (+x)
+  const wordRear = (key, halfWidth, yBottom) => {
+    const w = atlas.words[key];
+    const h = (halfWidth * 2) / w.aspect;
+    const u = float(halfWidth).sub(p.x).div(halfWidth * 2);
+    const v = p.y.sub(yBottom).div(h);
+    const inside = step(0.0, u).mul(step(u, 1.0)).mul(step(0.0, v)).mul(step(v, 1.0));
+    return texture(atlas.tex, vec2(u, v.mul(w.v1 - w.v0).add(w.v0))).r.mul(inside);
+  };
+
+  // 1. Policia Municipal de Terrassa: the corporate image of its 2024 Ford Kuga fleet (La Ciutat, 29-1-2024, nine
+  //    hybrid Kugas in front of the Ajuntament; the Catalan local-police image of blue, white & fluorescent yellow):
+  //    white doors with "policia municipal" in blue across them; the front wing and the rear quarter in fluorescent
+  //    yellow, each closed by a slanted blue block; a blue & white chequer along the sills, its ends slanted; the
+  //    bonnet blue with "policia" in white (readable from the front) and a yellow leading edge; blue bar. The tail is
+  //    NOT photographed: it carries the chequer and the blue band on from the sides (approximation, flagged)
+  const isMunicipal = step(0.5, state.w).mul(one.sub(step(1.5, state.w)));
+  const pmBlue = color(0x1e4fb8);
+  const pmYellow = color(0xf2e21c);
+  const white = color(0xf6f8fa);
+  const pmSide = isMunicipal.mul(sideBody);
+  // the sill chequer: two rows of 11 cm squares from the sill up, along the whole side, its ends cut on a slant
+  const chq = step(0.5, fract(floor(p.z.mul(1 / 0.11)).add(floor(p.y.sub(sillY).mul(1 / 0.11))).mul(0.5)));
+  const pmSlantF = p.z.sub(doorF + 0.05).add(p.y.sub(sillY).mul(0.55)); // a slant leaning forward
+  const pmSlantR = p.z.sub(doorR - 0.05).add(p.y.sub(sillY).mul(0.55));
+  const pmChequer = bandY(sillY + 0.02, sillY + 0.24).mul(alongSide).mul(outsideArch).mul(step(pmSlantF, 0.0)).mul(step(0.0, pmSlantR.add(0.6)));
+  // yellow front wing & rear quarter, each with a slanted blue block on the door side
+  const wingF = step(doorF + 0.02, p.z).mul(panelY);
+  const wingR = step(p.z, doorR - 0.02).mul(panelY);
+  const blueF = step(abs(pmSlantF.sub(0.12)), 0.08);
+  const blueR = step(abs(pmSlantR.add(0.42)), 0.08);
+  // "policia municipal" across both doors, standing over the chequer
+  const pmWord = wordSide('pm1', doorR + 0.06, doorF - 0.06, sillY + 0.3).mul(doorsSpan);
+  // bonnet: blue with a yellow leading edge, "policia" white reading from the front
+  const pmBonnetBlue = isTop.mul(step(cab.cowl + 0.04, p.z)).mul(step(p.z, spec.zFront - 0.3));
+  const pmBonnetYellow = isTop.mul(step(spec.zFront - 0.3, p.z)).mul(step(p.z, spec.zFront - 0.06));
+  const pmBonnetWord = wordBonnet('policia', 0.36, cab.cowl + 0.62);
+  // the tail: the chequer along the lower tailgate, the blue band above it up to the trunk edge (extrapolated)
+  const pmTailChq = bandY(spec.bumperLine[1] + 0.015, spec.bumperLine[1] + 0.125).mul(rear);
+  const pmTailChqCell = step(0.5, fract(floor(p.x.mul(1 / 0.11)).add(floor(p.y.sub(spec.bumperLine[1]).mul(1 / 0.11))).mul(0.5)));
+  const pmTailBlue = bandY(spec.bumperLine[1] + 0.125, spec.tail.edge[1] - 0.02).mul(rear);
+  painted = mix(painted, pmYellow, max(wingF, wingR).mul(pmSide));
+  painted = mix(painted, pmBlue, max(wingF.mul(blueF), wingR.mul(blueR)).mul(pmSide));
+  painted = mix(painted, mix(white, pmBlue, chq), pmChequer.mul(pmSide));
+  painted = mix(painted, pmBlue, pmWord.mul(pmSide));
+  painted = mix(painted, pmBlue, pmBonnetBlue.mul(isMunicipal));
+  painted = mix(painted, pmYellow, pmBonnetYellow.mul(isMunicipal));
+  painted = mix(painted, white, pmBonnetBlue.mul(pmBonnetWord).mul(isMunicipal));
+  painted = mix(painted, pmBlue, pmTailBlue.mul(isMunicipal));
+  painted = mix(painted, mix(white, pmBlue, pmTailChqCell), pmTailChq.mul(isMunicipal));
+
+  // 2. Mossos d'Esquadra
+  const isMossos = step(1.5, state.w);
+  const navy = color(0x15346f);
+  const mossosText = color(0x1e4db5);
+  const mossosRed = color(0xd8232a);
+  const paintedFrom = Math.max(sillY, spec.cladding || 0); // the body colour starts over the sill / the plastic cladding
+  const bandBottom = belt.sub(0.27);
+  const mBand = smoothstep(-0.01, 0.01, p.y.sub(bandBottom)).mul(smoothstep(0.0, -0.015, p.y.sub(belt))).mul(alongSide).mul(sideBody);
+  // two slanted white blocks (a red stripe on their front edge) cutting the band at the B pillar and the rear quarter
+  let mCut = float(0.0), mCutRed = float(0.0);
+  for (const zc of [doorM + 0.14, doorR - 0.16]) {
+    const sl = p.z.sub(zc).add(p.y.sub(bandBottom).mul(0.55));
+    mCut = max(mCut, step(abs(sl), 0.1));
+    mCutRed = max(mCutRed, step(0.1, sl).mul(step(sl, 0.17)));
+  }
+  // the red & white chequer just over the sill, "mossos d'esquadra" over it across both doors, the band over that
+  const mCheq = bandY(paintedFrom + 0.03, paintedFrom + 0.13).mul(step(spec.zRear + 0.95, p.z)).mul(step(p.z, spec.wheelZ - 0.58)).mul(outsideArch).mul(sideBody);
+  const mLetters = wordSide('mossos', doorR + 0.16, doorF - 0.2, paintedFrom + 0.17).mul(outsideArch).mul(sideBody);
+  const mCheqRed = one.sub(step(0.5, fract(p.z.mul(5.0))));
+  const mWingText = wordSide('policia', spec.wheelZ + 0.1, spec.wheelZ + 0.5, bandBottom.add(0.1));
+  const mBonnet = isTop.mul(step(cab.cowl + 0.06, p.z)).mul(step(p.z, spec.zFront - 0.08));
+  const mBonnetText = wordBonnet('policia', 0.42, cab.cowl + 0.6);
+  const mBonnetCheq = step(spec.zFront - 0.34, p.z).mul(step(p.z, spec.zFront - 0.21));
+  const mBonnetCheqRed = one.sub(step(0.5, fract(p.x.mul(1 / 0.24))));
+  painted = mix(painted, navy, mBand.mul(isMossos));
+  painted = mix(painted, white, mBand.mul(mCut).mul(isMossos));
+  painted = mix(painted, mossosRed, mBand.mul(mCutRed).mul(isMossos));
+  painted = mix(painted, white, mBand.mul(mWingText).mul(one.sub(mCut)).mul(isMossos));
+  painted = mix(painted, mossosText, mLetters.mul(isMossos));
+  painted = mix(painted, mix(white, mossosRed, mCheqRed), mCheq.mul(isMossos));
+  painted = mix(painted, navy, mBonnet.mul(isMossos));
+  painted = mix(painted, white, mBonnet.mul(mBonnetText).mul(isMossos));
+  painted = mix(painted, mix(white, mossosRed, mBonnetCheqRed), mBonnet.mul(mBonnetCheq).mul(isMossos));
+  // the tail: a red & white chequer along the lower tailgate just over the bumper line, the navy band over it up to
+  // the trunk's top edge, "www.mossos.cat" in white between the lamps (Wikimedia Commons: SEAT León CME 9347 from
+  // behind, Ford Kuga from the rear quarter)
+  const tailCheqY0 = spec.bumperLine[1] + 0.015, tailCheqY1 = spec.bumperLine[1] + 0.105;
+  const tailNavyY1 = spec.tail.edge[1] - 0.02;
+  const mTailCheq = bandY(tailCheqY0, tailCheqY1).mul(rear);
+  const mTailCheqRed = one.sub(step(0.5, fract(p.x.add(0.06).mul(1 / 0.24))));
+  const mTailNavy = bandY(tailCheqY1, tailNavyY1).mul(rear);
+  const mTailTextHalf = Math.max(0.3, tlX - tlW - 0.08);
+  const mTailText = wordRear('mossoscat', mTailTextHalf, (tailCheqY1 + tailNavyY1) * 0.5 - 0.02).mul(rear);
+  painted = mix(painted, navy, mTailNavy.mul(isMossos));
+  painted = mix(painted, mix(white, mossosRed, mTailCheqRed), mTailCheq.mul(isMossos));
+  painted = mix(painted, white, mTailText.mul(isMossos));
+
+  // 3. The Terrassa taxi
   if (spec.sign) {
-    // Diagonal double stripe (red, then blue) leaning forward across the front door, between the sill and the belt
-    const frontDoorMid = (spec.doors[0] + spec.doors[1]) / 2;
-    const frontDoorHalf = (spec.doors[0] - spec.doors[1]) / 2 - 0.03;
-    const doorPanel = step(abs(p.z.sub(frontDoorMid)), frontDoorHalf)
-      .mul(smoothstep(sillY + 0.06, sillY + 0.08, p.y))
-      .mul(smoothstep(0.0, -0.02, p.y.sub(belt)))
-      .mul(isSide)
-      .mul(isBody);
-    const diag = p.z.sub(frontDoorMid).sub(p.y.sub(0.68).mul(0.55));
-    const redStripe = smoothstep(0.062, 0.056, abs(diag.add(0.085)));
-    const blueStripe = smoothstep(0.042, 0.036, abs(diag.sub(0.035)));
-    const letters = step(0.35, sin(p.z.mul(95.0)))
-      .mul(step(abs(p.z.sub(frontDoorMid).sub(0.2)), 0.1))
-      .mul(smoothstep(0.03, 0.026, abs(p.y.sub(0.66))));
-    const licence = step(0.3, sin(p.z.mul(150.0)))
-      .mul(step(abs(p.z.sub(spec.zRear + 0.6)), 0.075))
-      .mul(smoothstep(0.016, 0.013, abs(p.y.sub(0.8))))
-      .mul(isSide)
-      .mul(isBody);
-    painted = mix(mix(painted, color(0xc8102e), redStripe.mul(doorPanel)), color(0x1f4e9c), blueStripe.mul(doorPanel));
-    painted = mix(painted, color(0x121417), max(letters.mul(doorPanel), licence));
+    const taxiRed = color(0xd42a2e);
+    const ink = color(0x121417);
+    // a stair of five 7 cm red squares stepping down towards the rear: high on the front door, low on the rear quarter
+    const stair = (z0, y0) => {
+      let m = float(0.0);
+      for (const [col, row] of [[0, 0], [1, 0], [1, 1], [2, 1], [2, 2]]) {
+        m = max(m, step(abs(p.z.sub(z0 - col * 0.075)), 0.034).mul(step(abs(p.y.sub(y0).add(row * 0.075)), 0.034))); // y0 may be a node
+      }
+      return m;
+    };
+    const stairFront = stair(doorF - 0.1, belt.sub(0.08));
+    const stairRear = stair(doorR + 0.3, sillY + 0.36);
+    // the crest (a diamond outline with a crown) over "Terrassa" and "TAXI nn" in black, centred on the front door
+    const cz = p.z.sub(frontDoorMid), cy = p.y.sub(sillY + 0.4);
+    const diamondD = abs(cz).add(abs(cy));
+    const crest = step(0.055, diamondD).mul(step(diamondD, 0.072));
+    const towers = step(abs(cz), 0.012).mul(step(abs(cy.sub(0.0)), 0.03));
+    const crown = step(abs(cz), 0.045).mul(step(0.082, cy)).mul(step(cy, 0.1)).mul(step(0.3, sin(cz.mul(140.0))));
+    const line1 = wordSide('terrassa', frontDoorMid - 0.085, frontDoorMid + 0.085, sillY + 0.4 - 0.125);
+    const line2 = wordSide('taxi', frontDoorMid - 0.075, frontDoorMid + 0.075, sillY + 0.4 - 0.165);
+    const marks = max(max(crest, towers), max(crown, max(line1, line2))).mul(sideBody);
+    painted = mix(painted, taxiRed, max(stairFront, stairRear).mul(sideBody));
+    painted = mix(painted, ink, marks);
   }
 
   // Panel shading: soft occlusion low down & under the arch lips; unpainted cladding (SUVs); door shut lines &
@@ -2096,6 +2343,8 @@ export {
   createLoftedCarMaterial,
   buildLightbarGeometry,
   createLightbarMaterial,
+  createLightbarMesh,
+  LIGHTBAR_PATTERN,
   BUS_SPEC,
   buildLoftedBusBodyGeometry,
   buildBusSignGeometry,

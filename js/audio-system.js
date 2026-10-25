@@ -264,13 +264,18 @@ class CityAudioSystem {
     for (const source of candidates) {
       if (siren && !source.police) continue;
       if (++count > limit) break;
+      const voiceKind = siren ? (source.sirenKind || 'siren') : source.kind;
       let slot = pool.get(source.id);
+      if (slot && slot.kind !== voiceKind) {
+        // the driver switched siren tones (K): a new voice for the same car, right away
+        slot.voice.dispose(); slot.emitter.dispose(); pool.delete(source.id); slot = null;
+      }
       if (!slot) {
         // Retiring voices count against the budget, so rapid source changes cannot temporarily double the graph.
         if (pool.size >= limit) continue;
         const emitter = new SpatialEmitter(this.context, this.mix, this.reflections, this.acoustics,
           siren ? 9 : source.kind === 'helicopter' ? 12 : 4, siren ? 0.9 : 0, siren);
-        slot = { emitter, voice: createMotorVoice(this.context, this.resources, siren ? 'siren' : source.kind, emitter.input),
+        slot = { emitter, voice: createMotorVoice(this.context, this.resources, voiceKind, emitter.input), kind: voiceKind,
           distance: 0, x: source.x, y: source.y, z: source.z, fresh: true };
         pool.set(source.id, slot);
       }

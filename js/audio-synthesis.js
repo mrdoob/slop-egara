@@ -318,9 +318,23 @@ function smoothParameter(parameter, timeConstant = 0.07, epsilon = 0.0001, snapI
   };
 }
 
-// Siren voices: 'siren' is the Spanish two-tone (hi-lo) pattern the Policia Municipal and the other emergency services
-// use here (two notes alternating about once a second); 'siren-wail' keeps the American wail/yelp sweep.
-const SIREN_KINDS = ['siren', 'siren-wail'];
+// Siren voices, the tones of the Spanish electronic sirens (Policia Local, Mossos d'Esquadra, SEM): 'siren' the
+// two-tone (hi-lo, two notes alternating about once a second), 'siren-wail' the slow sweep (with the occasional yelp
+// burst the AI cars throw in), 'siren-yelp' the fast sweep (~3 Hz), 'siren-phaser' the very fast stutter (~9 Hz,
+// narrow). The driver of a patrol car cycles them with K (controllers.js setSiren).
+const SIREN_KINDS = ['siren', 'siren-wail', 'siren-yelp', 'siren-phaser'];
+
+// Siren tuning, read every render so it can be changed while playing (window.__slop.sirenTuning in the console):
+//   twoTone: low & high note (Hz), rate (alternations per second), glide (s between notes), cutoff (Hz of the horn's
+//            low-pass: the brightness), body (Hz of the horn's resonance) & bodyGain (dB), level (0..1)
+//   sweep:   low & high of the wail/yelp sweep (Hz), phaserSpan (Hz about the centre), rates (Hz) per kind, cutoff,
+//            body, bodyGain, level
+// Nobody has analysed a recording of a Catalan siren yet (HOW_TO_IMPROVE.md §5.1): these are a bright, loud starting
+// point in the European hi-lo family, to be set by ear by the owner.
+const SIREN_TUNING = {
+  twoTone: { low: 700, high: 930, rate: 0.8, glide: 0.04, cutoff: 7000, body: 1800, bodyGain: 6, level: 0.16 },
+  sweep: { low: 520, high: 1450, phaserSpan: 240, wailRate: 0.25, yelpRate: 3.3, phaserRate: 10, cutoff: 7500, body: 2000, bodyGain: 6, level: 0.16 }
+};
 
 export function createMotorVoice(context, resources, kind, output) {
   if (!['sedan', 'suv', 'bus', 'helicopter', 'cyclist', ...SIREN_KINDS].includes(kind)) {
@@ -540,19 +554,23 @@ export function createMotorVoice(context, resources, kind, output) {
       noiseRate((0.9 + Math.min(1, movement) * 0.2) * doppler, now);
     };
   } else if (kind === 'siren') {
-    // Two-tone: the horn jumps between ~660 and ~880 Hz (a fourth apart, centre 770 Hz) about once a second. The
-    // square control wave (resources.sirenTwoTone) drives the oscillator frequency; the same wave nudges the level
-    // so the upper note sits a touch louder, as it does on the real horns.
-    const siren = oscillator(resources.sirenWave, 770);
-    const highpass = filter('highpass', 380, 0.7);
-    const hornBody = filter('peaking', 1400, 1.0);
-    hornBody.gain.value = 3.5;
-    const hornFilter = filter('lowpass', 3600, 0.65);
+    // Two-tone ("bitonal"): two held notes about a fourth apart, each for ~0.75 s, the electronic horn gliding between
+    // them over ~60 ms (the European hi-lo family: UK 780/980 Hz, Germany 440/550, France 435/580; the Spanish units sit
+    // low and slow, here 590/760 Hz at 0.67 Hz: an approximation, no reference recording was analysed, HOW_TO_IMPROVE.md
+    // §5.1). The square control wave (resources.sirenTwoTone) drives the oscillator frequency through a low-pass that
+    // rounds the step into the glide; the same wave nudges the level so the upper note sits a touch louder.
+    const T = SIREN_TUNING.twoTone;
+    const siren = oscillator(resources.sirenWave, (T.low + T.high) / 2);
+    const highpass = filter('highpass', 300, 0.7);
+    const hornBody = filter('peaking', T.body, 1.2);
+    hornBody.gain.value = T.bodyGain;
+    const hornFilter = filter('lowpass', T.cutoff, 0.7);
     const sirenGain = gain();
     siren.connect(highpass).connect(hornBody).connect(hornFilter).connect(sirenGain).connect(mix);
-    const toggle = oscillator(resources.sirenTwoTone, 1.0);
+    const toggle = oscillator(resources.sirenTwoTone, T.rate);
+    const glide = filter('lowpass', 1 / Math.max(0.005, T.glide * 2 * Math.PI), 0.5); // the glide between the notes
     const toggleDepth = gain();
-    toggle.connect(toggleDepth).connect(siren.frequency);
+    toggle.connect(glide).connect(toggleDepth).connect(siren.frequency);
     const envelopeDepth = gain();
     toggle.connect(envelopeDepth).connect(sirenGain.gain);
     const sirenFrequency = smoothParameter(siren.frequency, 0.09, 0.1);
@@ -562,24 +580,31 @@ export function createMotorVoice(context, resources, kind, output) {
     const envelopeLevel = smoothParameter(envelopeDepth.gain, 0.10);
     const sirenCutoff = smoothParameter(hornFilter.frequency, 0.12, 1);
     const hornFrequency = smoothParameter(hornBody.frequency, 0.12, 1);
+    const glideCutoff = smoothParameter(glide.frequency, 0.1, 0.1);
     render = (speed, load, doppler, now) => {
+      const T2 = SIREN_TUNING.twoTone;
       const pitch = (0.98 + variation * 0.04) * doppler;
-      sirenFrequency(770 * pitch, now);
-      toggleRange(110 * pitch, now);
-      // Each car alternates at its own cadence (0.9-1.1 Hz); Doppler shifts the pitch and the cadence alike
-      toggleFrequency((0.9 + variation * 0.2) * doppler, now);
-      sirenLevel(0.09, now);
-      envelopeLevel(0.012, now);
-      sirenCutoff(3600 * doppler, now);
-      hornFrequency(1400 * doppler, now);
+      sirenFrequency(((T2.low + T2.high) / 2) * pitch, now);
+      toggleRange(((T2.high - T2.low) / 2) * pitch, now);
+      // Each car alternates at its own cadence (±7 %); Doppler shifts pitch and cadence alike
+      toggleFrequency(T2.rate * (0.93 + variation * 0.14) * doppler, now);
+      glideCutoff(1 / Math.max(0.005, T2.glide * 2 * Math.PI), now);
+      hornBody.gain.value = T2.bodyGain;
+      sirenLevel(T2.level, now);
+      envelopeLevel(T2.level * 0.13, now);
+      sirenCutoff(T2.cutoff * doppler, now);
+      hornFrequency(T2.body * doppler, now);
     };
   } else {
-    // American wail / yelp sweep (kept as 'siren-wail')
-    const siren = oscillator(resources.sirenWave, 1125);
-    const highpass = filter('highpass', 480, 0.7);
-    const hornBody = filter('peaking', 1750, 1.1);
-    hornBody.gain.value = 3.5;
-    const hornFilter = filter('lowpass', 4200, 0.65);
+    // Sweep sirens: wail (slow), yelp (fast) and phaser (very fast, narrow), one circuit with different control rates
+    // Wail: a slow sweep low → high and back (SIREN_TUNING.sweep); yelp the same sweep fast; phaser a narrow, very fast one
+    const sweepKind = kind;
+    const S = SIREN_TUNING.sweep;
+    const siren = oscillator(resources.sirenWave, (S.low + S.high) / 2);
+    const highpass = filter('highpass', 380, 0.7);
+    const hornBody = filter('peaking', S.body, 1.1);
+    hornBody.gain.value = S.bodyGain;
+    const hornFilter = filter('lowpass', S.cutoff, 0.65);
     const sirenGain = gain();
     siren.connect(highpass).connect(hornBody).connect(hornFilter).connect(sirenGain).connect(mix);
     const sweep = oscillator(resources.sirenSweep, 0.2);
@@ -595,17 +620,20 @@ export function createMotorVoice(context, resources, kind, output) {
     const sirenCutoff = smoothParameter(hornFilter.frequency, 0.12, 1);
     const hornFrequency = smoothParameter(hornBody.frequency, 0.12, 1);
     render = (speed, load, doppler, now) => {
+      const S2 = SIREN_TUNING.sweep;
       const pitch = (0.98 + variation * 0.04) * doppler;
-      sirenFrequency(1125 * pitch, now);
-      sweepRange(425 * pitch, now);
-      // Hold a long wail, then briefly select yelp. Different cars switch independently; the oscillator
-      // keeps its phase through a change, and Doppler shifts both the pitch and the sweep cadence.
-      const yelp = (now + variation * 24) % 24 >= 19;
-      sweepFrequency((yelp ? 3 : 0.2) * (0.97 + variation * 0.06) * doppler, now);
-      sirenLevel(0.09, now);
-      envelopeLevel(0.01, now);
-      sirenCutoff(4200 * doppler, now);
-      hornFrequency(1750 * doppler, now);
+      sirenFrequency(((S2.low + S2.high) / 2) * pitch, now);
+      sweepRange((sweepKind === 'siren-phaser' ? S2.phaserSpan : (S2.high - S2.low) / 2) * pitch, now);
+      // Wail: the AI cars hold a long wail, then briefly select yelp (the oscillator keeps its phase through a change);
+      // the player's wail stays a wail. Yelp and phaser hold their rate. Doppler shifts both the pitch and the cadence.
+      const yelp = variation > 0 && (now + variation * 24) % 24 >= 19;
+      const rate = sweepKind === 'siren-phaser' ? S2.phaserRate : sweepKind === 'siren-yelp' ? S2.yelpRate : yelp ? S2.yelpRate : S2.wailRate;
+      sweepFrequency(rate * (0.97 + variation * 0.06) * doppler, now);
+      hornBody.gain.value = S2.bodyGain;
+      sirenLevel(S2.level, now);
+      envelopeLevel(S2.level * 0.11, now);
+      sirenCutoff(S2.cutoff * doppler, now);
+      hornFrequency(S2.body * doppler, now);
     };
   }
 
@@ -643,3 +671,5 @@ export function createMotorVoice(context, resources, kind, output) {
 
   return { update, dispose };
 }
+
+export { SIREN_TUNING };

@@ -38,9 +38,10 @@ function roadLoad(speed, acceleration, maxAcceleration) {
   return unit(acceleration / maxAcceleration + unit(speed / 2) * (0.12 + 0.28 * unit(speed / 30) ** 2));
 }
 
-function writeMotor(item, id, kind, x, y, z, speed, load, heading, police, player, seed, blocked, gain, range, verticalSpeed = 0) {
+function writeMotor(item, id, kind, x, y, z, speed, load, heading, police, player, seed, blocked, gain, range, verticalSpeed = 0, sirenKind = 'siren') {
   item.id = id;
   item.kind = kind;
+  item.sirenKind = sirenKind; // which siren voice (audio-synthesis.js SIREN_KINDS) when `police`
   item.x = x;
   item.y = y;
   item.z = z;
@@ -111,12 +112,12 @@ class CityAudioSources {
     return dx * dx + dy * dy + dz * dz;
   }
 
-  motor(id, kind, x, y, z, speed, load, heading, police, player, seed, blocked, gain = 1, range = kind === 'helicopter' ? 500 : 160, verticalSpeed = 0) {
+  motor(id, kind, x, y, z, speed, load, heading, police, player, seed, blocked, gain = 1, range = kind === 'helicopter' ? 500 : 160, verticalSpeed = 0, sirenKind = 'siren') {
     const d2 = this.distanceSq(x, y, z);
     if (!Number.isFinite(d2)) return;
     if (police && d2 <= SIREN_RANGE * SIREN_RANGE) {
       const siren = this.sirens.take(d2);
-      if (siren) writeMotor(siren, id, 'siren', x, y, z, speed, load, heading, true, player, seed, blocked, 1, 200);
+      if (siren) writeMotor(siren, id, 'siren', x, y, z, speed, load, heading, true, player, seed, blocked, 1, 200, 0, sirenKind);
     }
     const reach = kind === 'helicopter' ? range : MOTOR_RANGE;
     if (d2 > reach * reach) return;
@@ -151,7 +152,7 @@ class CityAudioSources {
       if (!v.edge) continue;
       const vy = (v._gy ?? terrainY(v.x, v.z)) + 0.7; // the engine sits on the relief under the car (traffic.js)
       const d2 = this.distanceSq(v.x, vy, v.z);
-      const range = v.isPolice ? SIREN_RANGE : MOTOR_RANGE;
+      const range = v.siren ? SIREN_RANGE : MOTOR_RANGE;
       if (!Number.isFinite(d2) || d2 > range * range) continue;
       if (d2 <= MOTOR_RANGE * MOTOR_RANGE) {
         this.snapshot.traffic += (1 - d2 / (MOTOR_RANGE * MOTOR_RANGE)) * (0.2 + 0.8 * unit(v.speed / 12));
@@ -159,7 +160,8 @@ class CityAudioSources {
       const green = !v.edge.to.signal || signalPhase(elapsed, v.edge.axisIndex === 0) === 'green';
       const blocked = v.wait > 2 && v.speed < 0.5 && v.gap < 8 && v.leaderSpeed < 0.5 && green && !v.conn && !v.yielding;
       this.motor(v, v.bus ? 'bus' : v.isSUV ? 'suv' : 'sedan', v.x, vy, v.z,
-        v.speed, roadLoad(v.speed, v.acc, v.driver.a), v.yaw + v.yawOffset, !!v.isPolice, false, seedAt(seedOffset + i), blocked);
+        v.speed, roadLoad(v.speed, v.acc, v.driver.a), v.yaw + v.yawOffset, !!v.siren, false, seedAt(seedOffset + i), blocked,
+        undefined, undefined, 0, v.sirenKind || 'siren');
     }
   }
 
@@ -190,8 +192,9 @@ class CityAudioSources {
         const load = player ? helicopter ? helicopterLoad(entity, keys, verticalSpeed) : driveLoad(keys, entity.speed, kind === 'cyclist') : 0;
         const gain = player ? 1 : helicopter ? 0.22 : 0.5;
         const range = helicopter ? (player ? 500 : 200) : 160;
+        // the player's patrol car: the siren the driver selected (controllers.js setSiren: K cycles the Spanish tones)
         this.motor(entity, kind, x, y + (helicopter ? 2.66 : 0.7), z, player ? entity.speed : 0, load, entity.heading,
-          false, player, seedAt(i), false, gain, range, verticalSpeed);
+          player && entity.sirenOn === true, player, seedAt(i), false, gain, range, verticalSpeed, entity.sirenKind || 'siren');
       }
     }
 
