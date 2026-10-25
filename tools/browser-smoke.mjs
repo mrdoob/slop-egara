@@ -12,7 +12,9 @@ import path from 'node:path';
 import os from 'node:os';
 
 const args = process.argv.slice(2);
-const opt = { url: 'http://127.0.0.1:8123/', out: '.', wait: 240, chrome: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', teleports: [], evals: [], port: 9333 };
+// --teleport, --eval and --shot run in the order given (a teleport also takes a screenshot; --shot takes one on
+// demand, e.g. after an --eval that changed the camera or the vehicle); --settle is the pause after each step (s)
+const opt = { url: 'http://127.0.0.1:8123/', out: '.', wait: 240, chrome: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', steps: [], port: 9333, settle: 3.5 };
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
   if (a === '--url') opt.url = args[++i];
@@ -20,8 +22,10 @@ for (let i = 0; i < args.length; i++) {
   else if (a === '--wait') opt.wait = Number(args[++i]);
   else if (a === '--chrome') opt.chrome = args[++i];
   else if (a === '--port') opt.port = Number(args[++i]);
-  else if (a === '--teleport') opt.teleports.push(args[++i]);
-  else if (a === '--eval') opt.evals.push(args[++i]);
+  else if (a === '--settle') opt.settle = Number(args[++i]);
+  else if (a === '--teleport') opt.steps.push(['teleport', args[++i]]);
+  else if (a === '--eval') opt.steps.push(['eval', args[++i]]);
+  else if (a === '--shot') opt.steps.push(['shot', args[++i]]);
 }
 fs.mkdirSync(opt.out, { recursive: true });
 fs.writeFileSync(path.join(opt.out, 'smoke-console.txt'), '');
@@ -104,19 +108,24 @@ try {
   };
   await shot('smoke-0.png');
   let n = 1;
-  for (const t of opt.teleports) {
-    const [x, z, heading = 0, mode = 'car'] = t.split(',');
-    const xArg = Number.isFinite(Number(x)) ? Number(x) : JSON.stringify(x); // a number, or a TELEPORT_LOCATIONS key
-    const expr = `window.__slop ? window.__slop.teleport(${xArg}, ${Number(z) || 0}, ${Number(heading) || 0}, ${JSON.stringify(mode)}) : 'no window.__slop hook'`;
-    const r = await send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
-    log('teleport', t, '->', JSON.stringify(r.result?.value ?? r.exceptionDetails?.text));
-    await sleep(3500);
-    await shot(`smoke-${n++}.png`);
+  for (const [kind, arg] of opt.steps) {
+    if (kind === 'teleport') {
+      const [x, z, heading, mode = 'car'] = arg.split(',').map((v) => v.trim());
+      const xArg = Number.isFinite(Number(x)) ? Number(x) : JSON.stringify(x); // a number, or a TELEPORT_LOCATIONS key
+      const expr = `window.__slop ? window.__slop.teleport(${xArg}, ${Number(z) || 0}, ${Number(heading) || 0}, ${JSON.stringify(mode)}) : 'no window.__slop hook'`;
+      const r = await send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
+      log('teleport', arg, '->', JSON.stringify(r.result?.value ?? r.exceptionDetails?.text));
+      await sleep(opt.settle * 1000);
+      await shot(`smoke-${n++}.png`);
+    } else if (kind === 'eval') {
+      const r = await send('Runtime.evaluate', { expression: arg, awaitPromise: true, returnByValue: true });
+      log('eval', arg, '->', JSON.stringify(r.result?.value ?? r.exceptionDetails?.text));
+      await sleep(opt.settle * 1000);
+    } else if (kind === 'shot') {
+      await shot(arg.endsWith('.png') ? arg : `${arg}.png`);
+    }
   }
-  for (const e of opt.evals) {
-    const r = await send('Runtime.evaluate', { expression: e, awaitPromise: true, returnByValue: true });
-    log('eval', e, '->', JSON.stringify(r.result?.value ?? r.exceptionDetails?.text));
-  }
+
   log(`${console_.length} console lines, ${errors.length} errors -> ${path.join(opt.out, 'smoke-console.txt')}`);
   for (const e of errors.slice(0, 10)) log('ERROR', e.slice(0, 400));
 } finally {
