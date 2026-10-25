@@ -3,7 +3,7 @@ import { Fn, float, color, positionLocal, uniform, mod, fract, step, smoothstep,
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { SIGNAL_TIMING, blockAt, STREET_TREES, nearestRoads, prettyName, UNNAMED, LAND_CLASS, WORLD_BOUNDS, blockProfile } from './city-config.js';
 import { cityUniforms, createTreeGrateMaterial } from './tsl-materials.js';
-import { createTreeField } from './trees.js';
+import { createTreeField, TREE_SPECIES } from './trees.js';
 import { pavedPlazaRects, parkTreeSites, sidewalkBlocks, parkLampSites, localGroundAt } from './city-grid.js';
 import { terrainActive, terrainY } from './terrain.js';
 import { GEO } from './terrassa-geodata.js';
@@ -1215,8 +1215,26 @@ function buildStreetDetails(scene, opts = {}) {
     }
   }
 
+  // Low solid props the player collides with (controllers.js, FEATURES.propCollisions): a cylinder per post, bollard,
+  // bin and tree trunk, read off the instance matrices once everything is placed, whoever placed it (VDR-0030)
+  const obstacles = [];
+  const fromMatrices = (list, r, h, kind) => {
+    for (const m of list) obstacles.push({ x: m.elements[12], z: m.elements[14], r, h, kind });
+  };
+  fromMatrices(M.column, 0.14, 8, 'post');
+  fromMatrices(M.post, 0.07, 4.5, 'post');
+  fromMatrices(M.signalPole, 0.09, 5, 'post');
+  fromMatrices(M.pedPole, 0.06, 3, 'post');
+  fromMatrices(M.plaquePole, 0.05, 3, 'post');
+  fromMatrices(M.bollard, 0.08, 0.9, 'bollard');
+  fromMatrices(M.bin, 0.24, 1.0, 'bin');
+  for (const t of treePositions) {
+    const trunk = (TREE_SPECIES[t.species] && TREE_SPECIES[t.species].trunk ? TREE_SPECIES[t.species].trunk.r : 0.3) * (t.scale || 1);
+    obstacles.push({ x: t.x, z: t.z, r: trunk + 0.04, h: 6, kind: 'tree' });
+  }
+
   scene.add(group);
-  return { group, footprints, signalClock, audioSignals, update, stats };
+  return { group, footprints, obstacles, signalClock, audioSignals, update, stats };
 }
 
 export { buildStreetDetails };

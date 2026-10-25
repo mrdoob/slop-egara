@@ -5,7 +5,8 @@ import {
   isTypingInField,
   blockAt,
   parkAt,
-  SPAWN
+  SPAWN,
+  FEATURES
 } from './city-config.js';
 import { cityUniforms, createCarPaintMaterial, createContactShadowMaterial } from './tsl-materials.js';
 import {
@@ -17,20 +18,26 @@ import {
   buildHelicopterBodyGeometry,
   buildHelicopterMainRotorGeometry,
   buildHelicopterTailRotorGeometry,
-  createLoftedHelicopterMaterial
+  createLoftedHelicopterMaterial,
+  createLightbarMesh,
+  LIGHTBAR_PATTERN
 } from './actor-models.js';
 import { PersonCrowd, PersonRig } from './pedestrians.js';
 import { groundHeightAt, roadHeightAt } from './city-grid.js';
 import { terrainY } from './terrain.js';
 import { HEADLIGHTS, createVehicleHeadlight, placeVehicleHeadlight } from './vehicle-lights.js';
+import { VEHICLE_CATALOGUE, vehicleById, createVehicleState, stepVehicle } from './vehicle-physics.js';
 
 // js/controllers.js
 // Sculpted, non-blocky GTA 6-style 3D models, animations, and physics controllers
 // for Third-Person Navigation:
 // 1. Person (Skinned Pedestrian: planted-footstep IK walk/run/jump, see pedestrians.js)
-// 2. Car (Aerodynamic Sculpted Terrassa White Taxi with Sloped Windshield & Clearcoat)
+// 2. Car (Aerodynamic Sculpted Terrassa White Taxi with Sloped Windshield & Clearcoat; with FEATURES.vehicleGarage any
+//    car of the catalogue in vehicle-physics.js, and with FEATURES.carPhysics driven by its four-wheel model)
 // 3. Cyclist (Sculpted Road Cyclist with Drop-Bar Frame & Aero Helmet)
 // 4. Helicopter (Twin-Turbine Chopper)
+// With FEATURES.enterExit the player is one person who gets in and out of the car and on and off the bike (F in
+// main.js): the pedestrian is hidden while driving, the rider while walking, and parked bicycles can be taken.
 
 // Spawn by the Plaça Vella (city-config.js SPAWN: on the nearest street, facing along it). The other modes start a
 // few metres away: the pedestrian on the sidewalk beside the car, the cyclist ahead, the helicopter above & behind.
@@ -79,10 +86,13 @@ function driveSpeed(speed, throttle, boost, dt, drive) {
 // Walking surface for the player's pedestrian (its rig samples it around its feet)
 const personGround = (controllers, x, z) => controllers.getGroundHeight(x, z, 'person');
 
-function collisionBody(mode, radius, heading, margin = 0) {
+// The car's half extents (m): the taxi's unless a catalogue vehicle says otherwise (entity.halfW / halfL)
+const CAR_HALF_W = 0.86, CAR_HALF_L = 2.18;
+
+function collisionBody(mode, radius, heading, margin = 0, halfW = CAR_HALF_W, halfL = CAR_HALF_L) {
   const car = mode === 'car';
   const sin = Math.sin(heading), cos = Math.cos(heading);
-  const hx = 0.86 + margin, hz = 2.18 + margin;
+  const hx = halfW + margin, hz = halfL + margin;
   return {
     car, sin, cos, hx, hz, radius: radius + margin,
     extX: car ? Math.abs(cos) * hx + Math.abs(sin) * hz : radius + margin,
@@ -145,31 +155,37 @@ function buildingContact(c, x, y, z, body, contact) {
 }
 
 function createTaxiDoorDecalTexture() {
-  // Terrassa's municipal taxi livery: white car, a diagonal red & blue double stripe across the front doors, the
-  // licence number under it (the number is invented: see HOW_TO_IMPROVE.md)
+  // Terrassa's taxi door marking (fleet photos 2019-2022, HOW_TO_IMPROVE.md §5.1): a plain white door with the city's
+  // crest (a lozenge with the castle, a mural crown over it) and "Terrassa / TAXI nn" in black under it. The licence
+  // number is invented. The red pixel stair motifs are painted by the car material (actor-models.js) on every taxi
   const c = document.createElement('canvas');
   c.width = 256;
   c.height = 128;
   const ctx = c.getContext('2d');
   ctx.fillStyle = '#f4f4f1';
   ctx.fillRect(0, 0, 256, 128);
-  ctx.save();
-  ctx.beginPath();
-  ctx.moveTo(40, 128); ctx.lineTo(130, 0); ctx.lineTo(166, 0); ctx.lineTo(76, 128); ctx.closePath();
-  ctx.fillStyle = '#c8102e';
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(84, 128); ctx.lineTo(174, 0); ctx.lineTo(200, 0); ctx.lineTo(110, 128); ctx.closePath();
-  ctx.fillStyle = '#1f4e9c';
-  ctx.fill();
-  ctx.restore();
+  ctx.strokeStyle = '#111317';
   ctx.fillStyle = '#111317';
-  ctx.textAlign = 'left';
+  ctx.lineWidth = 2.2;
+  const cx = 128, cy = 52, r = 22;
+  // lozenge
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - r); ctx.lineTo(cx + r, cy); ctx.lineTo(cx, cy + r); ctx.lineTo(cx - r, cy); ctx.closePath();
+  ctx.stroke();
+  // the castle: a keep with two towers, and the stripes of the right half
+  ctx.fillRect(cx - 9, cy - 4, 6, 12);
+  ctx.fillRect(cx - 3, cy - 1, 5, 9);
+  ctx.fillRect(cx - 9, cy - 7, 2, 3); ctx.fillRect(cx - 6, cy - 7, 2, 3);
+  for (let i = 0; i < 3; i++) ctx.fillRect(cx + 5 + i * 4, cy - 8 + i * 2, 1.5, 16 - i * 4);
+  // mural crown
+  ctx.fillRect(cx - 12, cy - r - 9, 24, 3);
+  for (const dx of [-11, -4, 3, 9]) ctx.fillRect(cx + dx, cy - r - 15, 3, 6);
+  ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.font = '900 22px Inter, Arial, sans-serif';
-  ctx.fillText('TAXI', 150, 86);
-  ctx.font = '700 13px Inter, Arial, sans-serif';
-  ctx.fillText('TERRASSA · 47', 150, 108);
+  ctx.font = '600 14px Inter, Arial, sans-serif';
+  ctx.fillText('Terrassa', cx, 90);
+  ctx.font = '700 15px Inter, Arial, sans-serif';
+  ctx.fillText('TAXI 47', cx, 108);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
@@ -210,6 +226,8 @@ class ThirdPersonControllerManager {
     this.scene = scene;
     this.colliders = colliders;
     this._colliderCells = null; // built on first use, see nearColliders()
+    this._propCells = null; // low props (posts, bollards, trunks...) bucketed by setPropColliders()
+    this.parkedBikes = null; // parked-bikes.js field the pedestrian can take a bicycle from (enterNearby)
     this.activeMode = 'car'; // 'person' | 'car' | 'cyclist' | 'helicopter'
 
     this.keys = {
@@ -348,13 +366,13 @@ class ThirdPersonControllerManager {
     return this.entities[this.activeMode];
   }
 
-  teleportActiveTo(x, z, heading = Math.PI, savedAltitude = null) {
+  teleportActiveTo(x, z, heading = Math.PI, savedAltitude = null, opts = {}) {
     const ent = this.getActiveEntity();
     this.resetInput();
     if (!Number.isFinite(heading)) heading = ent.heading;
     const heli = this.activeMode === 'helicopter';
     const altitude = heli ? Math.max(0.25, Math.min(380, savedAltitude ?? Math.max(92, ent.position.y))) : 0;
-    const destination = this.findTeleportPosition(x, z, heading, altitude);
+    const destination = this.findTeleportPosition(x, z, heading, altitude, opts);
     if (destination) {
       ent.position.x = destination.x;
       ent.position.z = destination.z;
@@ -376,6 +394,14 @@ class ThirdPersonControllerManager {
       ent.lastCollisionSpark = null;
       for (const wheel of ent.wheels) if (wheel.isFront) wheel.steerPivot.rotation.y = 0;
       if (ent.carState) ent.carState.value.x = 1;
+      if (ent.phys) {
+        // the driving model restarts at rest where the car now stands, in D, on a level body
+        const s = ent.phys;
+        Object.assign(s, { x: ent.position.x, z: ent.position.z, heading: ent.heading, vx: 0, vz: 0, yawRate: 0, steer: 0, speed: 0, lateralSpeed: 0,
+          heave: 0, heaveVel: 0, pitch: 0, pitchVel: 0, roll: 0, rollVel: 0, gear: 1, shiftTimer: 0, rpm: s.spec.idle, skid: 0 });
+        for (const w of s.wheels) { w.comp = 0; w.compVel = 0; w.bump = 0; w.skid = 0; w.locked = w.spinning = false; }
+        ent.mesh.rotation.x = ent.mesh.rotation.z = 0;
+      }
     } else if (this.activeMode === 'cyclist') {
       ent.leanAngle = ent.leanPivot.rotation.z = 0;
     } else if (heli) {
@@ -390,19 +416,19 @@ class ThirdPersonControllerManager {
 
   // Find a fully clear arrival before moving the player. Sequential collision pushes can leave a player trapped
   // between overlapping buildings, so test whole candidate footprints instead; retain the old position if none fits.
-  findTeleportPosition(x, z, heading, altitude) {
+  findTeleportPosition(x, z, heading, altitude, { ignoreOthers = false } = {}) {
     if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
     const heli = this.activeMode === 'helicopter';
     const radius = heli ? 4.5 : this.activeMode === 'person' ? 0.48 : 0.65;
     const sinH = Math.sin(heading), cosH = Math.cos(heading);
-    const shape = collisionBody(this.activeMode, radius, heading, 0.1);
+    const entity = this.getActiveEntity();
+    const shape = collisionBody(this.activeMode, radius, heading, 0.1, entity.halfW ?? CAR_HALF_W, entity.halfL ?? CAR_HALF_L);
     const reach = Math.max(shape.extX, shape.extZ);
     const margin = heli ? 6000 : 0;
-    const entity = this.getActiveEntity();
-    // Conservative body cylinders, including the taxi's corners, bicycle wheels and helicopter tail/rotor.
+    // Conservative body cylinders, including the car's corners, bicycle wheels and helicopter tail/rotor.
     const body = { person: [0.48, 1.9], car: [2.4, 1.9], cyclist: [1.0, 1.9], helicopter: [6.2, 3.2] };
-    const others = Object.values(this.entities).filter(e => e !== entity).map(e => ({
-      x: e.position.x, z: e.position.z, radius: body[e.type][0],
+    const others = ignoreOthers ? [] : Object.values(this.entities).filter(e => e !== entity).map(e => ({
+      x: e.position.x, z: e.position.z, radius: e.type === 'car' && e.halfL ? Math.hypot(e.halfW, e.halfL) : body[e.type][0],
       bottom: e.position.y - (e.type === 'helicopter' ? 0.7 : 0), top: e.position.y + body[e.type][1]
     }));
     const cameraBack = Math.cos(0.09) * entity.chaseDistance;
@@ -433,6 +459,7 @@ class ThirdPersonControllerManager {
       for (const c of this.nearColliders(p.x, p.z, reach)) {
         if (buildingContact(c, p.x, baseY, p.z, shape)) return false;
       }
+      if (this._propCells && !heli && this.propContact(p.x, p.z, shape)) return false;
       return true;
     };
     const origin = clampPoint(x, z);
@@ -489,103 +516,28 @@ class ThirdPersonControllerManager {
   }
 
   // =========================================================================
-  // 2. CAR (3D LOFTED SCULPTED TERRASSA WHITE TAXI SEDAN)
+  // 2. CAR (3D LOFTED SCULPTED SEDAN / SUV: THE TERRASSA WHITE TAXI BY DEFAULT, ANY CATALOGUE VEHICLE WITH THE GARAGE)
   // =========================================================================
   createCarEntity() {
     const root = new THREE.Group();
-    root.name = 'PlayerTaxiCar';
-
-    const chassisPivot = new THREE.Group();
-    root.add(chassisPivot);
-
-    const spec = BODY_SPECS.taxi;
-    const taxiLoftMat = createLoftedCarMaterial(spec, 0xf4f4f1);
-
-    // 1. 3D Lofted Taxi Body + Curved Windscreens + Crowned Roof + Side Mirrors + Roof Sign
-    const carBodyGeo = buildCarGeometry(spec, false);
-    const carBodyMesh = new THREE.Mesh(carBodyGeo, taxiLoftMat);
-    carBodyMesh.castShadow = true;
-    carBodyMesh.receiveShadow = true;
-    chassisPivot.add(carBodyMesh);
-
-    // 2. Terrassa taxi door livery: the diagonal red & blue stripe with the municipal licence number, hugging the curved front doors
-    const doorDecalTex = createTaxiDoorDecalTexture();
-    const doorDecalMat = new THREE.MeshStandardNodeMaterial({
-      map: doorDecalTex,
-      roughness: 0.24,
-      metalness: 0.34,
-      polygonOffset: true,
-      polygonOffsetFactor: -2,
-      polygonOffsetUnits: -2
-    });
-    const doorMid = (spec.doors[0] + spec.doors[1]) / 2;
-    for (const side of [-1, 1]) {
-      const decal = new THREE.Mesh(buildCarSidePatch(spec, side, doorMid - 0.36, doorMid + 0.36, 0.53, 0.81, 0.003), doorDecalMat);
-      chassisPivot.add(decal);
-    }
-
-    // 3. Spanish number plates on the bumpers (white, blue EU band)
-    const nyPlateTex = createSpanishPlateTexture();
-    const nyPlateMat = new THREE.MeshStandardNodeMaterial({ map: nyPlateTex, roughness: 0.28 });
-    const rearPlate = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.14, 0.02), nyPlateMat);
-    rearPlate.position.set(0, spec.plates[1], spec.zRear - 0.006);
-    chassisPivot.add(rearPlate);
-
-    const frontPlate = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.14, 0.02), nyPlateMat);
-    frontPlate.position.set(0, spec.plates[0], spec.zFront + 0.006);
-    chassisPivot.add(frontPlate);
-
-    // 3b. Brake lights, CHMSL & turn signals are lit by the taxi material from its carState uniform (see updateCar)
-    const carState = taxiLoftMat.userData.carState;
-
-    // 4. Steerable & Spinning 3D LatheGeometry Tyres + Recessed 5-Spoke Alloy Wheels
-    const leftWheelGeo = buildSteerableWheelGeo(spec, -1);
-    const rightWheelGeo = buildSteerableWheelGeo(spec, 1);
-
-    const wheels = [];
-    const wheelCoords = [
-      { side: -1, z: spec.wheelZ, isFront: true },
-      { side: 1, z: spec.wheelZ, isFront: true },
-      { side: -1, z: -spec.wheelZ, isFront: false },
-      { side: 1, z: -spec.wheelZ, isFront: false }
-    ];
-    for (const wc of wheelCoords) {
-      const steerPivot = new THREE.Group();
-      steerPivot.position.set(wc.side * spec.wheelX, spec.wheelRadius, wc.z);
-      const tire = new THREE.Mesh(wc.side < 0 ? leftWheelGeo : rightWheelGeo, taxiLoftMat);
-      tire.castShadow = true;
-      tire.receiveShadow = true;
-      steerPivot.add(tire);
-      root.add(steerPivot);
-      wheels.push({ steerPivot, tire, isFront: wc.isFront });
-    }
-
-    // 5. Soft Under-Car Contact Shadow (AO) + Clustered Dual LED Headlight SpotLights & Rear Brake PointLight
-    const carShadowGeo = new THREE.PlaneGeometry(2.22, 5.05);
-    carShadowGeo.rotateX(-Math.PI * 0.5);
-    const carShadow = new THREE.Mesh(carShadowGeo, createContactShadowMaterial());
-    carShadow.position.set(0, 0.02, 0.0);
-    carShadow.renderOrder = 998;
-    root.add(carShadow);
-
-    const headLights = [];
-    for (const side of [-1, 1]) {
-      const spot = createVehicleHeadlight();
-      placeVehicleHeadlight(spot, spec, side);
-      chassisPivot.add(spot, spot.target);
-      headLights.push(spot);
-    }
-
+    root.name = 'PlayerCar';
+    root.rotation.order = 'YXZ'; // the heading, then the slope's pitch & roll (updateCarPhysics)
     this.scene.add(root);
-
-    return {
+    const entity = {
       type: 'car',
       label: 'Terrassa Taxi',
       mesh: root,
-      chassisPivot,
-      carState,
-      headLights,
-      wheels,
+      visual: null,
+      chassisPivot: null,
+      carState: null,
+      headLights: [],
+      wheels: [],
+      lightbar: null,
+      vehicle: null, // the catalogue entry (vehicle-physics.js)
+      spec: null, // its body loft (actor-models.js BODY_SPECS)
+      phys: null, // its driving model state (FEATURES.carPhysics)
+      halfW: CAR_HALF_W,
+      halfL: CAR_HALF_L,
       position: spawnAt(0, 0),
       heading: SPAWN.heading,
       speed: 0,
@@ -603,6 +555,216 @@ class ThirdPersonControllerManager {
       chaseDistance: 6.9,
       chaseHeight: 2.12
     };
+    this.applyVehicle(entity, vehicleById('taxi'));
+    return entity;
+  }
+
+  // Dress the car entity as a catalogue vehicle: body loft & livery, plates, lamps, wheels, the police light bar, its
+  // collision extents and its driving model. Called once at creation and by setVehicle(); the car keeps its place
+  applyVehicle(entity, vehicle) {
+    const root = entity.mesh;
+    if (entity.visual) {
+      root.remove(entity.visual);
+      entity.visual.traverse((o) => { if (o.isMesh && o.geometry && !o.userData.sharedGeometry) o.geometry.dispose(); });
+      for (const g of entity.visual.userData.wheelGeometries || []) g.dispose();
+    }
+    const spec = BODY_SPECS[vehicle.body] || BODY_SPECS.taxi;
+    const visual = new THREE.Group();
+    visual.name = `PlayerCar:${vehicle.id}`;
+    const chassisPivot = new THREE.Group();
+    visual.add(chassisPivot);
+
+    // 1. Lofted body + curved glass + crowned roof + mirrors (+ the taxi's roof sign), painted by the car material
+    const bodyMat = createLoftedCarMaterial(spec, vehicle.paint);
+    const bodyMesh = new THREE.Mesh(buildCarGeometry(spec, false), bodyMat);
+    bodyMesh.castShadow = true;
+    bodyMesh.receiveShadow = true;
+    chassisPivot.add(bodyMesh);
+
+    // 2. Terrassa taxi door livery: the diagonal red & blue stripe with the municipal licence number on the front doors
+    if (vehicle.taxiDecal) {
+      this._doorDecalMat ??= new THREE.MeshStandardNodeMaterial({
+        map: createTaxiDoorDecalTexture(), roughness: 0.24, metalness: 0.34, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2
+      });
+      const doorMid = (spec.doors[0] + spec.doors[1]) / 2;
+      for (const side of [-1, 1]) {
+        chassisPivot.add(new THREE.Mesh(buildCarSidePatch(spec, side, doorMid - 0.36, doorMid + 0.36, 0.53, 0.81, 0.003), this._doorDecalMat));
+      }
+    }
+
+    // 3. Spanish number plates on the bumpers (white, blue EU band)
+    this._plateMat ??= new THREE.MeshStandardNodeMaterial({ map: createSpanishPlateTexture(), roughness: 0.28 });
+    const rearPlate = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.14, 0.02), this._plateMat);
+    rearPlate.position.set(0, spec.plates[1], spec.zRear - 0.006);
+    const frontPlate = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.14, 0.02), this._plateMat);
+    frontPlate.position.set(0, spec.plates[0], spec.zFront + 0.006);
+    chassisPivot.add(rearPlate, frontPlate);
+
+    // 3b. Brake lights, CHMSL, turn signals & livery are painted by the material from its carState uniform
+    const carState = bodyMat.userData.carState;
+    if (carState) carState.value.set(0, 0, 0, vehicle.livery || 0);
+
+    // 3c. The police light bar (dark until the driver selects a mode: barLit, see setLightbar) and two blue point
+    // lights under its halves that follow the pattern (updateCarLights)
+    let lightbar = null;
+    const barLights = [];
+    if (vehicle.lightbar) {
+      lightbar = createLightbarMesh(spec, 1);
+      lightbar.setMatrixAt(0, new THREE.Matrix4());
+      lightbar.instanceMatrix.needsUpdate = true;
+      lightbar.castShadow = true;
+      chassisPivot.add(lightbar);
+      const barY = lightbar.geometry.boundingBox ? lightbar.geometry.boundingBox.max.y : spec.cabin.roofY[0][1] + 0.12;
+      for (const side of [-1, 1]) {
+        const pt = new THREE.PointLight(0x3d82ff, 0, 11, 1.3);
+        pt.position.set(side * 0.3, barY + 0.05, (spec.cabin.roofFront + spec.cabin.roofRear) * 0.5 + 0.3);
+        chassisPivot.add(pt);
+        barLights.push(pt);
+      }
+    }
+
+    // 4. Steerable & spinning lathe tyres with recessed alloys: each wheel on its own pivot in the root (not on the
+    // sprung body), so with the driving model each one rides its own ground while the body moves on its springs
+    const leftWheelGeo = buildSteerableWheelGeo(spec, -1);
+    const rightWheelGeo = buildSteerableWheelGeo(spec, 1);
+    const wheels = [];
+    // local +x is the car's left: physics wheel order FL, FR, RL, RR (vehicle-physics.js)
+    for (const wc of [
+      { side: 1, z: spec.wheelZ, isFront: true, physIndex: 0 },
+      { side: -1, z: spec.wheelZ, isFront: true, physIndex: 1 },
+      { side: 1, z: -spec.wheelZ, isFront: false, physIndex: 2 },
+      { side: -1, z: -spec.wheelZ, isFront: false, physIndex: 3 }
+    ]) {
+      const steerPivot = new THREE.Group();
+      steerPivot.position.set(wc.side * spec.wheelX, spec.wheelRadius, wc.z);
+      const tire = new THREE.Mesh(wc.side < 0 ? leftWheelGeo : rightWheelGeo, bodyMat);
+      tire.userData.sharedGeometry = true; // the two geometries are shared by two wheels each: disposed below
+      tire.castShadow = true;
+      tire.receiveShadow = true;
+      steerPivot.add(tire);
+      visual.add(steerPivot);
+      wheels.push({ steerPivot, tire, isFront: wc.isFront, physIndex: wc.physIndex });
+    }
+    visual.userData.wheelGeometries = [leftWheelGeo, rightWheelGeo];
+
+    // 5. Soft under-car contact shadow + clustered LED headlight spots
+    const carShadow = new THREE.Mesh(new THREE.PlaneGeometry(spec.wheelX * 2 + 0.56, spec.zFront - spec.zRear + 0.55).rotateX(-Math.PI * 0.5), createContactShadowMaterial());
+    carShadow.position.set(0, 0.02, 0.0);
+    carShadow.renderOrder = 998;
+    visual.add(carShadow);
+    const headLights = [];
+    for (const side of [-1, 1]) {
+      const spot = createVehicleHeadlight();
+      placeVehicleHeadlight(spot, spec, side);
+      chassisPivot.add(spot, spot.target);
+      headLights.push(spot);
+    }
+
+    visual.traverse((child) => {
+      if (child.isMesh && !child.material?.isMeshBasicNodeMaterial && child.material?.type !== 'MeshBasicNodeMaterial' && !child.material?.transparent) {
+        child.castShadow = true;
+        child.receiveShadow = true;
+      }
+    });
+    root.add(visual);
+
+    const suv = spec.name === 'suv';
+    Object.assign(entity, {
+      visual, chassisPivot, carState, headLights, wheels, lightbar, barLights, vehicle, spec,
+      lightMode: 0, sirenKind: 'off', sirenOn: false, turnSignal: 0, turnStartHeading: 0,
+      label: FEATURES.vehicleGarage ? vehicle.label : 'Terrassa Taxi',
+      halfW: suv ? 0.92 : CAR_HALF_W,
+      halfL: Math.max(2.0, spec.zFront - 0.07),
+      speed: 0, vx: 0, vz: 0, angularVel: 0, pitchVel: 0, rollVel: 0, heaveY: 0, heaveVel: 0, steerAngle: 0, wheelSpin: 0,
+      chaseHeight: suv ? 2.3 : 2.12
+    });
+    entity.cameraTargetOffset.y = suv ? 1.1 : 0.96;
+    entity.phys = FEATURES.carPhysics ? createVehicleState(vehicle, { wheelbase: spec.wheelZ * 2, track: spec.wheelX * 2 }) : null;
+    if (entity.phys) Object.assign(entity.phys, { x: entity.position.x, z: entity.position.z, heading: entity.heading });
+    root.rotation.x = root.rotation.z = 0;
+    return entity;
+  }
+
+  // Swap the player's car for another catalogue vehicle (FEATURES.vehicleGarage), where it stands
+  setVehicle(id) {
+    const vehicle = vehicleById(id);
+    const c = this.entities.car;
+    if (c.vehicle && c.vehicle.id === vehicle.id) return vehicle;
+    this.applyVehicle(c, vehicle);
+    return vehicle;
+  }
+
+  // The police bar of the player's car: mode 0 off, 1 posició (steady), 2 prioritari (alternating halves),
+  // 3 emergència (triple bursts), 4 escombrat (sweep); see actor-models.js createLightbarMaterial. L cycles it (main.js)
+  setLightbar(mode) {
+    const c = this.entities.car;
+    if (!c.lightbar) { c.lightMode = 0; return false; }
+    const m = Math.max(0, Math.min(4, mode === true ? 3 : mode === false ? 0 : Math.round(mode) || 0));
+    c.lightMode = m;
+    const attr = c.lightbar.geometry.getAttribute('barLit');
+    if (attr.array[0] !== m) {
+      attr.array[0] = m;
+      attr.needsUpdate = true;
+    }
+    return true;
+  }
+
+  cycleLightbar(step = 1) {
+    const c = this.entities.car;
+    if (!c.lightbar) return 0;
+    this.setLightbar(((c.lightMode || 0) + step + 5) % 5);
+    return c.lightMode;
+  }
+
+  // The siren of the player's patrol car (audio-sources.js reads sirenOn & sirenKind): 'off' or one of the Spanish
+  // tones of audio-synthesis.js SIREN_KINDS. K cycles them (main.js)
+  static get SIREN_KINDS() { return ['off', 'siren', 'siren-wail', 'siren-yelp', 'siren-phaser']; }
+
+  setSiren(kind) {
+    const c = this.entities.car;
+    const kinds = ThirdPersonControllerManager.SIREN_KINDS;
+    c.sirenKind = c.lightbar && kinds.includes(kind) ? kind : 'off';
+    c.sirenOn = c.sirenKind !== 'off';
+    return c.sirenKind;
+  }
+
+  cycleSiren(step = 1) {
+    const c = this.entities.car;
+    if (!c.lightbar) return 'off';
+    const kinds = ThirdPersonControllerManager.SIREN_KINDS;
+    const current = Math.max(0, kinds.indexOf(c.sirenKind || 'off'));
+    return this.setSiren(kinds[(current + step + kinds.length) % kinds.length]);
+  }
+
+  // Turn signals of the player's car: 1 left, -1 right, 2 hazards, 0 off. Asking for the one already on cancels it;
+  // a signal cancels itself once the car has turned through ~50 degrees and the wheel is back near straight
+  setTurnSignal(signal) {
+    const c = this.entities.car;
+    c.turnSignal = c.turnSignal === signal ? 0 : signal;
+    c.turnStartHeading = c.heading;
+    c.turnPeak = 0;
+    return c.turnSignal;
+  }
+
+  // Blinkers (carState.y left, .z right) and the bar's point lights, every frame
+  updateCarLights(c, elapsed) {
+    if (c.turnSignal === 1 || c.turnSignal === -1) {
+      let turned = c.heading - c.turnStartHeading;
+      turned = Math.atan2(Math.sin(turned), Math.cos(turned)) * c.turnSignal; // + when turning the signalled way
+      c.turnPeak = Math.max(c.turnPeak || 0, turned);
+      if (c.turnPeak > 0.85 && Math.abs(c.steerAngle) < 0.05) c.turnSignal = 0;
+    }
+    const blinkOn = c.turnSignal !== 0 && (elapsed % 0.8) < 0.4 ? 1 : 0;
+    if (c.carState) {
+      c.carState.value.y = c.turnSignal === 1 || c.turnSignal === 2 ? blinkOn : 0;
+      c.carState.value.z = c.turnSignal === -1 || c.turnSignal === 2 ? blinkOn : 0;
+    }
+    if (c.barLights && c.barLights.length) {
+      // the same cadences as the lens shader (actor-models.js LIGHTBAR_PATTERN), one light per half
+      const [left, right] = LIGHTBAR_PATTERN(c.lightMode || 0, elapsed);
+      c.barLights[0].intensity = 40 * right; // index 0 is -x: the car's right
+      c.barLights[1].intensity = 40 * left;
+    }
   }
 
   // =========================================================================
@@ -904,6 +1066,139 @@ class ThirdPersonControllerManager {
     return out;
   }
 
+  // The low solid props the player collides with (FEATURES.propCollisions): cylinders { x, z, r, kind } from
+  // street-details.js & city-grid.js (lamp posts, signal poles, bollards, bins, tree trunks), bucketed in 48 m cells
+  setPropColliders(props) {
+    const CELL = 48;
+    const key = (ix, iz) => (ix + 4096) * 8192 + (iz + 4096);
+    const cells = new Map();
+    for (const p of props) {
+      if (!Number.isFinite(p.x) || !Number.isFinite(p.z)) continue;
+      for (let ix = Math.floor((p.x - p.r) / CELL); ix <= Math.floor((p.x + p.r) / CELL); ix++) {
+        for (let iz = Math.floor((p.z - p.r) / CELL); iz <= Math.floor((p.z + p.r) / CELL); iz++) {
+          const k = key(ix, iz);
+          let list = cells.get(k);
+          if (!list) cells.set(k, (list = []));
+          list.push(p);
+        }
+      }
+    }
+    this._propCells = cells;
+    this._propCount = props.length;
+    this._nearProps = [];
+    this._propStamp = 0;
+  }
+
+  nearProps(x, z, r) {
+    const CELL = 48;
+    const key = (ix, iz) => (ix + 4096) * 8192 + (iz + 4096);
+    if (!this._propCells) return [];
+    const out = this._nearProps;
+    out.length = 0;
+    const stamp = ++this._propStamp;
+    for (let ix = Math.floor((x - r) / CELL); ix <= Math.floor((x + r) / CELL); ix++) {
+      for (let iz = Math.floor((z - r) / CELL); iz <= Math.floor((z + r) / CELL); iz++) {
+        const list = this._propCells.get(key(ix, iz));
+        if (!list) continue;
+        for (const p of list) {
+          if (p._seen === stamp) continue;
+          p._seen = stamp;
+          if (Math.abs(p.x - x) <= r + p.r && Math.abs(p.z - z) <= r + p.r) out.push(p);
+        }
+      }
+    }
+    return out;
+  }
+
+  // Does a body (collisionBody) at (x, z) overlap a prop cylinder? Fills `contact` with the push normal (from the prop
+  // towards the body), its depth and the contact point in the car's frame (qx left, qz forward)
+  propOverlap(p, x, z, body, contact) {
+    const dx = p.x - x, dz = p.z - z;
+    if (body.car) {
+      const lx = dx * body.cos - dz * body.sin; // left
+      const lz = dx * body.sin + dz * body.cos; // forward
+      const qx = Math.max(-body.hx, Math.min(body.hx, lx));
+      const qz = Math.max(-body.hz, Math.min(body.hz, lz));
+      const ex = lx - qx, ez = lz - qz;
+      const d = Math.hypot(ex, ez);
+      if (d >= p.r) return false;
+      let nlx, nlz, depth;
+      if (d > 1e-6) {
+        nlx = -ex / d; nlz = -ez / d; depth = p.r - d;
+      } else {
+        const px = body.hx - Math.abs(lx), pz = body.hz - Math.abs(lz);
+        if (px < pz) { nlx = lx <= 0 ? 1 : -1; nlz = 0; depth = px + p.r; } else { nlx = 0; nlz = lz <= 0 ? 1 : -1; depth = pz + p.r; }
+      }
+      if (contact) {
+        contact.nx = nlx * body.cos + nlz * body.sin;
+        contact.nz = -nlx * body.sin + nlz * body.cos;
+        contact.nlx = nlx; contact.nlz = nlz; contact.qx = qx; contact.qz = qz; contact.depth = depth;
+      }
+      return true;
+    }
+    const d = Math.hypot(dx, dz);
+    const rr = p.r + body.radius;
+    if (d >= rr) return false;
+    if (contact) {
+      if (d > 1e-6) { contact.nx = -dx / d; contact.nz = -dz / d; } else { contact.nx = 1; contact.nz = 0; }
+      contact.nlx = contact.nlz = contact.qx = contact.qz = 0;
+      contact.depth = rr - d;
+    }
+    return true;
+  }
+
+  propContact(x, z, body) {
+    for (const p of this.nearProps(x, z, Math.max(body.extX, body.extZ) + 0.5)) {
+      if (this.propOverlap(p, x, z, body, null)) return true;
+    }
+    return false;
+  }
+
+  // Push the player out of the props it overlaps and knock its motion: a post, bollard or trunk stops the car dead on
+  // its side and spins it about the contact, a bin gives way; the pedestrian and the cyclist slide round them
+  resolvePropCollisions(pos, body, carEntity, entity) {
+    const contact = this._propContactInfo ??= { nx: 0, nz: 0, nlx: 0, nlz: 0, qx: 0, qz: 0, depth: 0 };
+    const props = this.nearProps(pos.x, pos.z, Math.max(body.extX, body.extZ) + 0.5);
+    for (let i = 0; i < props.length; i++) {
+      const p = props[i];
+      if (!this.propOverlap(p, pos.x, pos.z, body, contact)) continue;
+      const { nx, nz, nlx, nlz, qx, qz, depth } = contact;
+      pos.x += nx * depth;
+      pos.z += nz * depth;
+      if (!entity) continue;
+      const sin = Math.sin(entity.heading), cos = Math.cos(entity.heading);
+      const tvx = sin * (entity.speed || 0) + (entity.vx || 0);
+      const tvz = cos * (entity.speed || 0) + (entity.vz || 0);
+      const vn = -(tvx * nx + tvz * nz); // approach speed
+      if (vn <= 0.3) continue;
+      const soft = p.kind === 'bin' ? 0.45 : 1;
+      if (carEntity) {
+        const j = vn * (1 + 0.15) * soft;
+        const jf = j * (nx * sin + nz * cos); // along the heading: comes off the speed; the rest is slip
+        carEntity.speed += jf;
+        carEntity.vx = (carEntity.vx || 0) + nx * j - jf * sin;
+        carEntity.vz = (carEntity.vz || 0) + nz * j - jf * cos;
+        carEntity.angularVel = (carEntity.angularVel || 0) + (nlx * qz - nlz * qx) * Math.min(6, vn) * 0.14 * soft;
+        carEntity.pitchVel = (carEntity.pitchVel || 0) + nlz * Math.min(10, vn) * 0.12;
+        carEntity.rollVel = (carEntity.rollVel || 0) - nlx * Math.min(10, vn) * 0.15;
+        carEntity.heaveVel = (carEntity.heaveVel || 0) + Math.min(1.0, vn * 0.08);
+        if (vn > 2.2) carEntity.lastCollisionSpark = { x: p.x + nx * p.r, y: pos.y + 0.5, z: p.z + nz * p.r, nx, nz, speed: vn };
+      } else if (typeof entity.speed === 'number') {
+        entity.speed *= Math.max(0, 1 - Math.abs(nx * sin + nz * cos) * 0.85);
+      }
+      if (entity.type !== 'person') this.reportCollision(entity, p, 'prop', p.x + nx * p.r, pos.y + 0.5, p.z + nz * p.r, nx, 0, nz, vn);
+    }
+  }
+
+  // Room for a pedestrian-sized body at (x, z), clear of buildings and props (parked-bikes.js uses it to place racks)
+  isClearAt(x, z, radius = 0.6) {
+    const body = collisionBody('person', radius, 0, 0);
+    const y = this.getGroundHeight(x, z, 'person');
+    for (const c of this.nearColliders(x, z, radius + 0.5)) if (buildingContact(c, x, y, z, body)) return false;
+    if (this._propCells && this.propContact(x, z, body)) return false;
+    return true;
+  }
+
   resolveHorizontalCollision(pos, radius, carEntity = null, entity = carEntity) {
     // The detailed area (the helicopter may roam out over the Vallès & the surrounding towns)
     const heli = this.activeMode === 'helicopter';
@@ -923,7 +1218,8 @@ class ThirdPersonControllerManager {
       }
     }
 
-    const body = collisionBody(this.activeMode, radius, carEntity ? carEntity.heading : 0);
+    const body = collisionBody(this.activeMode, radius, carEntity ? carEntity.heading : 0, 0,
+      carEntity ? carEntity.halfW ?? CAR_HALF_W : CAR_HALF_W, carEntity ? carEntity.halfL ?? CAR_HALF_L : CAR_HALF_L);
     const { sin: sinH, cos: cosH, extX, extZ } = body;
     const contact = this._buildingContact ??= { nx: 0, nz: 0, depth: 0 };
 
@@ -942,7 +1238,7 @@ class ThirdPersonControllerManager {
           const sin = carEntity ? sinH : Math.sin(entity.heading);
           const cos = carEntity ? cosH : Math.cos(entity.heading);
           const approachSpeed = -((sin * entity.speed + (entity.vx || 0)) * nx + (cos * entity.speed + (entity.vz || 0)) * nz);
-          const support = carEntity ? Math.abs(nx * cos - nz * sin) * 0.86 + Math.abs(nx * sin + nz * cos) * 2.18 : radius;
+          const support = carEntity ? Math.abs(nx * cos - nz * sin) * body.hx + Math.abs(nx * sin + nz * cos) * body.hz : radius;
           this.reportCollision(entity, c, 'building', pos.x - nx * support, pos.y + (heli ? 1.1 : 0.56), pos.z - nz * support,
             nx, 0, nz, approachSpeed);
         }
@@ -954,13 +1250,31 @@ class ThirdPersonControllerManager {
           if (vn > 0.5) {
             const headOn = Math.abs(sinH * nx + cosH * nz);
             const sideDot = cosH * nx - sinH * nz;
-            carEntity.vx = (carEntity.vx || 0) + nx * vn * 0.42;
-            carEntity.vz = (carEntity.vz || 0) + nz * vn * 0.42;
-            if (headOn > 0.72) {
-              carEntity.speed = -carEntity.speed * 0.25;
+            if (carEntity.phys) {
+              // The driving model keeps whatever velocity it is handed, so the wall takes the approach velocity away
+              // (a small bounce), scrubs the sliding component and spins the car about the contact
+              const j = vn * 1.12;
+              const vx2 = totalVx + nx * j, vz2 = totalVz + nz * j;
+              const along = vx2 * nx + vz2 * nz;
+              const tx = (vx2 - nx * along) * (1 - 0.3 * headOn), tz = (vz2 - nz * along) * (1 - 0.3 * headOn);
+              const fwd = (nx * along + tx) * sinH + (nz * along + tz) * cosH;
+              carEntity.speed = fwd;
+              carEntity.vx = nx * along + tx - fwd * sinH;
+              carEntity.vz = nz * along + tz - fwd * cosH;
+              // lever: the car corner nearest the wall, in its frame (left, forward)
+              const nlx = nx * cosH - nz * sinH, nlz = nx * sinH + nz * cosH;
+              const qx = Math.abs(nlx) > 0.2 ? -Math.sign(nlx) * body.hx : 0;
+              const qz = Math.abs(nlz) > 0.2 ? -Math.sign(nlz) * body.hz : 0;
+              carEntity.angularVel = (carEntity.angularVel || 0) + (nlx * qz - nlz * qx) * Math.min(6, vn) * 0.08;
             } else {
-              carEntity.speed *= (1.0 - 0.62 * headOn);
-              carEntity.angularVel = (carEntity.angularVel || 0) + sideDot * (sinH * nx + cosH * nz >= 0 ? -1 : 1) * Math.min(3.2, vn * 0.22);
+              carEntity.vx = (carEntity.vx || 0) + nx * vn * 0.42;
+              carEntity.vz = (carEntity.vz || 0) + nz * vn * 0.42;
+              if (headOn > 0.72) {
+                carEntity.speed = -carEntity.speed * 0.25;
+              } else {
+                carEntity.speed *= (1.0 - 0.62 * headOn);
+                carEntity.angularVel = (carEntity.angularVel || 0) + sideDot * (sinH * nx + cosH * nz >= 0 ? -1 : 1) * Math.min(3.2, vn * 0.22);
+              }
             }
             carEntity.pitchVel = (carEntity.pitchVel || 0) + (sinH * nx + cosH * nz) * Math.min(14.0, vn) * 0.16;
             carEntity.rollVel = (carEntity.rollVel || 0) - sideDot * Math.min(14.0, vn) * 0.22;
@@ -968,7 +1282,7 @@ class ThirdPersonControllerManager {
             if (vn > 2.2) {
               carEntity.lastCollisionSpark = {
                 x: pos.x - nx * extX * 0.92,
-                y: 0.56,
+                y: pos.y + 0.56, // over the relief, not the absolute 0.56 of the flat city
                 z: pos.z - nz * extZ * 0.92,
                 nx,
                 nz,
@@ -990,6 +1304,9 @@ class ThirdPersonControllerManager {
         }
       }
     }
+
+    // The street furniture & the trees (FEATURES.propCollisions): not for the helicopter
+    if (this._propCells && !heli) this.resolvePropCollisions(pos, body, carEntity, entity);
   }
 
   // Pose the skinned characters once every entity has moved: the pedestrian's rig walks (or runs, turns, jumps) it to
@@ -1013,14 +1330,15 @@ class ThirdPersonControllerManager {
   }
 
   update(dt, elapsed) {
+    this._clock = elapsed;
     const heli = this.entities.helicopter;
     heli.mainRotorPivot.rotation.y += dt * 24.0;
     heli.tailRotorPivot.rotation.x += dt * 32.0;
 
     if (this.activeMode === 'person') {
       this.updatePerson(dt, elapsed);
-    } else {
-      // Keep the sidewalk pedestrian walking naturally when not actively controlled
+    } else if (!FEATURES.enterExit) {
+      // Keep the sidewalk pedestrian walking naturally when not actively controlled (the sandbox of the original)
       const p = this.entities.person;
       const walkSpeed = 1.48;
       p.speed = walkSpeed;
@@ -1032,7 +1350,10 @@ class ThirdPersonControllerManager {
 
     if (this.activeMode === 'car') {
       this.updateCar(dt, elapsed);
-    } else if (this.activeMode === 'cyclist') {
+    } else {
+      this.updateCarLights(this.entities.car, elapsed); // a parked patrol car keeps its bar & hazards running
+    }
+    if (this.activeMode === 'cyclist') {
       this.updateCyclist(dt, elapsed);
     } else if (this.activeMode === 'helicopter') {
       this.updateHelicopter(dt, elapsed);
@@ -1042,6 +1363,21 @@ class ThirdPersonControllerManager {
       const e = this.entities[key];
       e.mesh.position.copy(e.position);
       e.mesh.rotation.y = e.heading;
+    }
+
+    // One person: inside the car or on the bike while driving (hidden there), beside them when walking; the bike
+    // stands alone without its rider
+    if (FEATURES.enterExit) {
+      const p = this.entities.person, b = this.entities.cyclist;
+      const walking = this.activeMode === 'person', riding = this.activeMode === 'cyclist';
+      if (p.mesh.visible !== walking) {
+        p.mesh.visible = walking;
+        for (const m of p.crowd.meshes) m.visible = walking;
+      }
+      if (b.helmet.visible !== riding) {
+        b.helmet.visible = riding;
+        for (const m of b.riderCrowd.meshes) m.visible = riding;
+      }
     }
 
     // Modulate clustered vehicle & bike lights by time of day (off during Midday & Golden Hour; fade in at Dusk & Night)
@@ -1095,6 +1431,7 @@ class ThirdPersonControllerManager {
 
   updateCar(dt) {
     const c = this.entities.car;
+    if (c.phys) return this.updateCarPhysics(dt);
     const maxSpeed = this.keys.boost ? CAR_DRIVE.boostSpeed : CAR_DRIVE.speed;
 
     let throttle = 0;
@@ -1161,6 +1498,7 @@ class ThirdPersonControllerManager {
     if (c.carState) {
       c.carState.value.x = braking || (c.speed === 0 && !throttle) ? 1 : 0;
     }
+    this.updateCarLights(c, this._clock || 0);
 
     const forwardDist = (c.position.x - prevX) * Math.sin(c.heading) + (c.position.z - prevZ) * Math.cos(c.heading);
     const rawWheelStep = forwardDist / 0.35;
@@ -1172,6 +1510,123 @@ class ThirdPersonControllerManager {
         w.steerPivot.rotation.y = c.steerAngle;
       }
     }
+  }
+
+  // The four-wheel driving model (vehicle-physics.js, FEATURES.carPhysics). W accelerates, S brakes and, held at a
+  // standstill, engages reverse (then S accelerates backwards and W brakes), A/D steer, Shift is the handbrake
+  updateCarPhysics(dt) {
+    const c = this.entities.car;
+    const s = c.phys;
+    const k = this.keys;
+    const fwd = +k.forward || 0, back = +k.backward || 0;
+    // In R the pedals swap (S accelerates backwards, W brakes) until the car has stopped and only W is held: then W
+    // asks for D again and pulls away forward
+    const backToDrive = s.gear < 0 && Math.abs(s.speed) < 0.6 && fwd > 0 && back === 0;
+    const reversing = s.gear < 0 && !backToDrive;
+    const input = this._carInput ??= { throttle: 0, brake: 0, steer: 0, handbrake: false, reverse: false };
+    input.throttle = reversing ? back : fwd;
+    input.brake = reversing ? fwd : back;
+    input.reverse = back > 0 && fwd === 0 && (reversing || Math.abs(s.speed) < 0.6);
+    input.steer = (+k.left || 0) - (+k.right || 0);
+    input.handbrake = !!k.boost;
+
+    // Carry in what the collisions changed on the entity since the last step (this manager's and the traffic's:
+    // position, forward speed, slip velocity, spin & suspension kicks)
+    let sinH = Math.sin(c.heading), cosH = Math.cos(c.heading);
+    s.x = c.position.x;
+    s.z = c.position.z;
+    s.heading = c.heading;
+    s.vx = sinH * c.speed + c.vx;
+    s.vz = cosH * c.speed + c.vz;
+    s.yawRate += c.angularVel;
+    s.pitchVel += c.pitchVel * 0.5;
+    s.rollVel += c.rollVel * 0.5;
+    s.heaveVel += c.heaveVel * 0.5;
+    c.angularVel = c.pitchVel = c.rollVel = c.heaveVel = 0;
+
+    const env = this._carEnv ??= { groundAt: (x, z, hint) => this.getGroundHeight(x, z, 'car', hint) };
+    stepVehicle(s, input, dt, env);
+
+    // Back to the entity, which is what the camera, HUD, audio & traffic read: the forward speed along the heading
+    // plus the slip velocity, and the collisions against buildings, props & traffic on top
+    c.position.x = s.x;
+    c.position.z = s.z;
+    c.heading = s.heading;
+    sinH = Math.sin(s.heading);
+    cosH = Math.cos(s.heading);
+    c.speed = s.speed;
+    c.vx = s.vx - sinH * s.speed;
+    c.vz = s.vz - cosH * s.speed;
+    c.steerAngle = s.steer;
+    this.resolveHorizontalCollision(c.position, 1.35, c);
+    c.position.y = s.y;
+
+    // Pose: the root follows the ground plane under the four wheels (the slope), the body rides its springs over it,
+    // each wheel sits on its own ground (a kerb lifts one side, a stone one wheel)
+    c.mesh.rotation.x = -s.slopePitch;
+    c.mesh.rotation.z = s.slopeRoll;
+    c.chassisPivot.position.y = s.heave;
+    c.chassisPivot.rotation.x = -s.pitch;
+    c.chassisPivot.rotation.z = s.roll;
+    const wheelR = c.spec ? c.spec.wheelRadius : 0.35;
+    for (const w of c.wheels) {
+      const pw = s.wheels[w.physIndex];
+      w.steerPivot.position.y = wheelR + (pw.bump || 0);
+      w.tire.rotation.x = pw.spin;
+      if (w.isFront) w.steerPivot.rotation.y = s.steer;
+    }
+    if (c.carState) c.carState.value.x = input.brake > 0.05 || (Math.abs(s.speed) < 0.05 && input.throttle < 0.02) ? 1 : 0;
+    this.updateCarLights(c, this._clock || 0);
+  }
+
+  // F (main.js): out of the car or off the bike onto the street beside it. The vehicle stays where it is, at rest
+  exitVehicle() {
+    const mode = this.activeMode;
+    if (mode !== 'car' && mode !== 'cyclist') return null;
+    const v = this.entities[mode];
+    // the driver's door is on the car's left (+x local); the rider steps off to the left too
+    const leftX = Math.cos(v.heading), leftZ = -Math.sin(v.heading);
+    const side = mode === 'car' ? (v.halfW || CAR_HALF_W) + 0.8 : 0.9;
+    const back = mode === 'car' ? -0.2 : 0;
+    v.speed = 0;
+    v.vx = v.vz = v.angularVel = 0;
+    if (v.phys) { v.phys.vx = v.phys.vz = v.phys.yawRate = 0; v.phys.speed = 0; }
+    if (v.carState) v.carState.value.x = 0;
+    this.setMode('person');
+    this.teleportActiveTo(
+      v.position.x + leftX * side + Math.sin(v.heading) * back,
+      v.position.z + leftZ * side + Math.cos(v.heading) * back,
+      v.heading, null, { ignoreOthers: true }
+    );
+    return 'person';
+  }
+
+  // F (main.js): into the car or onto the bike when standing beside them, or onto a parked bicycle (parked-bikes.js)
+  enterNearby(maxDistance = 3.4) {
+    if (this.activeMode !== 'person') return null;
+    const p = this.entities.person;
+    const car = this.entities.car, bike = this.entities.cyclist;
+    const dCar = Math.hypot(car.position.x - p.position.x, car.position.z - p.position.z) - Math.max(0, (car.halfL || CAR_HALF_L) - 1.3);
+    const dBike = Math.hypot(bike.position.x - p.position.x, bike.position.z - p.position.z);
+    if (dCar <= maxDistance && dCar <= dBike) {
+      this.resetInput();
+      this.setMode('car');
+      return 'car';
+    }
+    if (dBike <= maxDistance * 0.8) {
+      this.resetInput();
+      this.setMode('cyclist');
+      return 'cyclist';
+    }
+    if (this.parkedBikes) {
+      const taken = this.parkedBikes.take(p.position.x, p.position.z, 2.8);
+      if (taken) {
+        this.setMode('cyclist');
+        this.teleportActiveTo(taken.x, taken.z, taken.heading, null, { ignoreOthers: true });
+        return 'parked';
+      }
+    }
+    return null;
   }
 
   updateCyclist(dt) {

@@ -5,6 +5,8 @@ const test = require('node:test');
 const { loadModule } = require('./helpers/module.cjs');
 
 const source = readFileSync(join(__dirname, '../js/controllers.js'), 'utf8');
+// The driving model is pure arithmetic: the real module, so the car path can be exercised end to end
+const physics = loadModule(readFileSync(join(__dirname, '../js/vehicle-physics.js'), 'utf8'), { filename: 'vehicle-physics.js' });
 
 function eventTarget() {
   const listeners = new Map();
@@ -27,6 +29,7 @@ function keyboardHarness(nyc = {}) {
     parkAt: () => null,
     blockAt: () => null,
     isTypingInField: (event) => ['INPUT', 'SELECT'].includes(event.target?.tagName),
+    FEATURES: { carPhysics: true, propCollisions: true, vehicleGarage: true, enterExit: true },
     ...nyc
   };
   const { ThirdPersonControllerManager } = loadModule(source, {
@@ -35,9 +38,10 @@ function keyboardHarness(nyc = {}) {
       'three/webgpu': {},
       './city-config.js': config,
       './tsl-materials.js': {},
-      './actor-models.js': {},
+      './actor-models.js': { LIGHTBAR_PATTERN: (mode, t) => (mode ? [(t % 0.2) < 0.1 ? 1 : 0, (t % 0.2) < 0.1 ? 1 : 0] : [0, 0]) },
       './pedestrians.js': {},
       './vehicle-lights.js': {},
+      './vehicle-physics.js': physics,
       './city-grid.js': { groundHeightAt: () => 0, roadHeightAt: () => 0 },
       './terrain.js': { terrainY: () => 0, terrainGradient: (x, z, out = { gx: 0, gz: 0 }) => { out.gx = 0; out.gz = 0; return out; } }
     }
@@ -477,4 +481,231 @@ test('player clearance respects altitude and permits a ground arrival under an a
   assert.equal(ent.position.y, 0.22);
   helicopter.position.y = 1;
   assert.notDeepEqual({ ...controller.teleportActiveTo(0, 0) }, { x: 0, z: 0 }, 'a helicopter parked at street level must be avoided');
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Street furniture & trees (FEATURES.propCollisions), the driving model path and getting in and out (FEATURES.enterExit)
+// ---------------------------------------------------------------------------------------------------------------------
+
+test('the car cannot drive through a lamp post, and the post knocks it', () => {
+  const { controller, ent } = teleportHarness('car');
+  controller.setPropColliders([{ x: 0, z: 6, r: 0.12, h: 5, kind: 'post' }]);
+  ent.heading = 0; // facing +z
+  ent.speed = 14;
+  ent.vx = ent.vz = ent.angularVel = 0;
+  Object.assign(ent.position, { x: 0.3, y: 0, z: 3.95 }); // the nose (2.18 ahead) just inside the post
+  controller.resolveHorizontalCollision(ent.position, 1.35, ent);
+  assert.ok(ent.position.z < 3.95, 'pushed back out of the post');
+  assert.ok(ent.position.z + 2.18 <= 6 - 0.12 + 1e-6, 'the nose clears the post');
+  assert.ok(ent.speed < 14 * 0.2, `a head-on hit at 14 m/s stops it: ${ent.speed}`);
+  assert.ok(ent.angularVel !== 0, 'an off-centre hit spins it');
+  assert.ok(ent.lastCollisionSpark && ent.lastCollisionSpark.speed > 2, 'sparks');
+});
+
+test('a bin gives way where a bollard does not, and far props are ignored', () => {
+  for (const [kind, maxSpeedLeft] of [['bollard', 0.2], ['bin', 0.8]]) {
+    const { controller, ent } = teleportHarness('car');
+    controller.setPropColliders([{ x: 0, z: 6, r: 0.2, h: 1, kind }, { x: 300, z: 300, r: 0.3, h: 6, kind: 'tree' }]);
+    ent.heading = 0; ent.speed = 10; ent.vx = ent.vz = ent.angularVel = 0;
+    Object.assign(ent.position, { x: 0, y: 0, z: 3.9 });
+    controller.resolveHorizontalCollision(ent.position, 1.35, ent);
+    assert.ok(ent.speed <= 10 * maxSpeedLeft + 1e-6, `${kind}: ${ent.speed}`);
+    assert.ok(Math.abs(ent.angularVel) < 1e-9, 'a centred hit does not spin it');
+  }
+});
+
+test('pedestrians and cyclists slide round tree trunks instead of walking through them', () => {
+  for (const mode of ['person', 'cyclist']) {
+    const { controller, ent } = teleportHarness(mode);
+    controller.setPropColliders([{ x: 0, z: 0, r: 0.3, h: 6, kind: 'tree' }]);
+    Object.assign(ent.position, { x: 0.5, y: 0, z: 0.1 });
+    ent.heading = -Math.PI / 2; ent.speed = 3;
+    const radius = mode === 'person' ? 0.48 : 0.65;
+    controller.resolveHorizontalCollision(ent.position, radius, null, ent);
+    const d = Math.hypot(ent.position.x, ent.position.z);
+    assert.ok(Math.abs(d - (0.3 + radius)) < 1e-6, `${mode} rests against the trunk (${d})`);
+    assert.ok(!controller.isClearAt(0.2, 0, 0.48), 'the trunk is not a clear spot');
+    assert.ok(controller.isClearAt(5, 5, 0.48));
+    assert.notDeepEqual({ ...controller.teleportActiveTo(0, 0, 0) }, { x: 0, z: 0 }, 'teleports avoid it too');
+  }
+});
+
+function physicsCarHarness() {
+  const harness = teleportHarness('car');
+  const { controller, ent } = harness;
+  const vehicle = physics.vehicleById('compact');
+  ent.vehicle = vehicle;
+  ent.spec = { wheelRadius: 0.35, name: 'sedan' };
+  ent.halfW = 0.86; ent.halfL = 2.18;
+  ent.phys = physics.createVehicleState(vehicle, { wheelbase: 2.76, track: 1.66 });
+  ent.wheels = [0, 1, 2, 3].map((i) => ({ isFront: i < 2, physIndex: i, steerPivot: { position: { y: 0.35 }, rotation: { y: 0 } }, tire: { rotation: { x: 0 } } }));
+  ent.chassisPivot = { position: { y: 0 }, rotation: { x: 0, z: 0 } };
+  ent.mesh.rotation = { x: 0, y: 0, z: 0 };
+  Object.assign(ent.position, { x: 0, y: 0, z: 0 });
+  ent.heading = 0; ent.speed = 0; ent.vx = ent.vz = ent.angularVel = 0;
+  ent.phys.x = ent.phys.z = ent.phys.heading = 0;
+  controller.getGroundHeight = () => 0;
+  return harness;
+}
+
+test('with the driving model, W pulls away, A steers left, S brakes and the pose follows the body', () => {
+  const { controller, ent, key } = physicsCarHarness();
+  key('keydown', 'KeyW');
+  for (let i = 0; i < 180; i++) controller.updateCar(1 / 60);
+  assert.ok(ent.speed > 8, `3 s of throttle: ${ent.speed} m/s`);
+  assert.ok(ent.position.z > 10, 'moved ahead along +z');
+  assert.ok(ent.phys.rpm > ent.phys.spec.idle);
+  assert.ok(ent.chassisPivot.rotation.x < 0, 'nose up (rotation.x negative) while accelerating');
+  key('keydown', 'KeyA');
+  for (let i = 0; i < 90; i++) controller.updateCar(1 / 60);
+  assert.ok(ent.heading > 0.1, 'turned left');
+  assert.ok(ent.wheels[0].steerPivot.rotation.y > 0, 'front wheels steered left');
+  assert.ok(ent.chassisPivot.rotation.z > 0, 'leans out of the left-hand bend');
+  key('keyup', 'KeyA');
+  key('keyup', 'KeyW');
+  key('keydown', 'KeyS');
+  const before = ent.speed;
+  for (let i = 0; i < 20; i++) controller.updateCar(1 / 60);
+  assert.equal(ent.carState.value.x, 1, 'brake lights on');
+  for (let i = 0; i < 100; i++) controller.updateCar(1 / 60);
+  assert.ok(ent.speed < before * 0.2, `braked from ${before} to ${ent.speed}`);
+});
+
+test('with the driving model, holding S at a standstill reverses and the handbrake is Shift', () => {
+  const { controller, ent, key } = physicsCarHarness();
+  key('keydown', 'KeyS');
+  for (let i = 0; i < 180; i++) controller.updateCar(1 / 60);
+  assert.equal(ent.phys.gear, -1);
+  assert.ok(ent.speed < -1, `reversing at ${ent.speed}`);
+  assert.ok(ent.position.z < -1);
+  key('keyup', 'KeyS');
+  key('keydown', 'ShiftLeft');
+  for (let i = 0; i < 60; i++) controller.updateCar(1 / 60);
+  assert.ok(ent.phys.wheels[2].locked, 'the handbrake locks the rear wheels');
+  key('keyup', 'ShiftLeft');
+  // W while reversing brakes; once stopped, W held alone goes back to D and pulls away forward
+  key('keydown', 'KeyW');
+  for (let i = 0; i < 240; i++) controller.updateCar(1 / 60);
+  assert.equal(ent.phys.gear >= 1, true, `back in D (gear ${ent.phys.gear})`);
+  assert.ok(ent.speed > 2, `driving forward again at ${ent.speed}`);
+});
+
+test('the driving model takes the knocks of the traffic and the buildings into account', () => {
+  const { controller, ent } = physicsCarHarness();
+  ent.speed = 10;
+  ent.angularVel = 1.5; // a side swipe from a bus set it spinning
+  controller.updateCar(1 / 60);
+  assert.ok(ent.phys.yawRate > 1, 'the spin was carried into the model');
+  assert.equal(ent.angularVel, 0, 'and consumed');
+  // a wall right ahead
+  controller.colliders = [{ minX: -5, maxX: 5, minZ: 3, maxZ: 10, maxY: 30 }];
+  controller._colliderCells = null;
+  ent.angularVel = 0; ent.phys.yawRate = 0; ent.heading = ent.phys.heading = 0;
+  ent.speed = 12; ent.phys.vx = 0; ent.phys.vz = 12;
+  for (let i = 0; i < 30; i++) controller.updateCar(1 / 60);
+  assert.ok(ent.position.z + 2.18 <= 3 + 1e-6, 'stopped by the wall');
+  assert.ok(Math.abs(ent.speed) < 4, `bounced and lost its speed: ${ent.speed}`);
+});
+
+test('getting out puts the person by the driver door and getting in needs to be close', () => {
+  const harness = keyboardHarness({
+    ISLAND_BOUNDS: { minX: -500, maxX: 500, minZ: -500, maxZ: 500, sidewalkHeight: 0.15 },
+    getIslandBoundsAtZ: () => ({ westX: -500, eastX: 500 }),
+    blockAt: () => null
+  });
+  const { controller } = harness;
+  const position = (x = 0, y = 0, z = 0) => ({ x, y, z, copy(p) { this.x = p.x; this.y = p.y; this.z = p.z; } });
+  const pivot = () => ({ position: position(), rotation: { x: 0, y: 0, z: 0 } });
+  const car = {
+    type: 'car', chaseDistance: 6.9, chaseHeight: 2.12, position: position(10, 0, 20), heading: Math.PI / 2, speed: 9, vx: 1, vz: 0, angularVel: 0.3,
+    halfW: 0.86, halfL: 2.18, mesh: pivot(), carState: { value: { x: 1 } }, chassisPivot: pivot(), wheels: [], phys: { vx: 3, vz: 0, yawRate: 1, speed: 9 }
+  };
+  const person = {
+    type: 'person', chaseDistance: 4.3, chaseHeight: 1.95, position: position(100, 0, 100), heading: 0, speed: 2, verticalVel: 0, mesh: pivot(),
+    rig: { reset() {} }, crowd: { begin() {}, add() {}, end() {} }
+  };
+  const bike = { type: 'cyclist', chaseDistance: 4.8, chaseHeight: 2.05, position: position(-50, 0, -50), heading: 0, speed: 0, leanAngle: 0, leanPivot: pivot(), mesh: pivot() };
+  controller.entities = { car, person, cyclist: bike };
+  controller.colliders = [];
+  controller._colliderCells = null;
+  controller.getGroundHeight = () => 0;
+  controller.activeMode = 'car';
+  assert.equal(controller.exitVehicle(), 'person');
+  assert.equal(controller.activeMode, 'person');
+  assert.equal(car.speed, 0, 'the car is left at rest');
+  assert.equal(car.phys.vx, 0);
+  // facing +x (heading π/2): the car's left is -z, so the driver stands at z < 20 beside it
+  assert.ok(Math.abs(person.position.x - 10) < 0.5, `beside the door along the car: ${person.position.x}`);
+  assert.ok(person.position.z < 20 - 1 && person.position.z > 20 - 3, `by the driver's door: ${person.position.z}`);
+  assert.equal(person.heading, Math.PI / 2, 'facing the way the car faces');
+  assert.equal(controller.enterNearby(), 'car', 'standing by the door gets back in');
+  assert.equal(controller.activeMode, 'car');
+  controller.activeMode = 'person';
+  Object.assign(person.position, { x: 10, z: 30 });
+  assert.equal(controller.enterNearby(), null, '10 m away is too far');
+  Object.assign(person.position, { x: -50, z: -48 });
+  assert.equal(controller.enterNearby(), 'cyclist');
+  controller.activeMode = 'person';
+  Object.assign(person.position, { x: 200, z: 200 });
+  controller.parkedBikes = { take: (x, z, r) => (Math.hypot(x - 201, z - 200) <= r ? { x: 201, z: 200, heading: 1 } : null) };
+  assert.equal(controller.enterNearby(), 'parked');
+  assert.equal(controller.activeMode, 'cyclist');
+  assert.deepEqual([bike.position.x, bike.position.z, bike.heading], [201, 200, 1]);
+  assert.equal(controller.exitVehicle(), 'person');
+  assert.ok(Math.hypot(person.position.x - 201, person.position.z - 200) < 1.5, 'off the bike beside it');
+});
+
+test('indicators toggle, hazards blink both sides and a signal cancels itself after the turn', () => {
+  const { controller, ent } = physicsCarHarness();
+  ent.lightbar = null;
+  assert.equal(controller.setTurnSignal(1), 1);
+  controller._clock = 0.1;
+  controller.updateCarLights(ent, 0.1);
+  assert.deepEqual([ent.carState.value.y, ent.carState.value.z], [1, 0], 'left blinks in the on half of the cycle');
+  controller.updateCarLights(ent, 0.6);
+  assert.deepEqual([ent.carState.value.y, ent.carState.value.z], [0, 0], 'and is dark in the off half');
+  assert.equal(controller.setTurnSignal(1), 0, 'asking again cancels');
+  controller.setTurnSignal(2);
+  controller.updateCarLights(ent, 0.1);
+  assert.deepEqual([ent.carState.value.y, ent.carState.value.z], [1, 1], 'hazards');
+  controller.setTurnSignal(-1);
+  ent.heading = 0; ent.steerAngle = 0.4;
+  controller.setTurnSignal(0); controller.setTurnSignal(-1);
+  ent.heading = -1.0; // turned right through ~57 degrees
+  controller.updateCarLights(ent, 0.1);
+  assert.equal(ent.turnSignal, -1, 'still on while the wheel is turned');
+  ent.steerAngle = 0;
+  controller.updateCarLights(ent, 0.1);
+  assert.equal(ent.turnSignal, 0, 'cancels once the wheel is straight after the turn');
+});
+
+test('light bar modes and sirens cycle only on a patrol car', () => {
+  const { controller, ent } = physicsCarHarness();
+  ent.lightbar = null;
+  assert.equal(controller.cycleLightbar(), 0);
+  assert.equal(controller.cycleSiren(), 'off');
+  const attr = { array: new Float32Array(1), needsUpdate: false };
+  ent.lightbar = { geometry: { getAttribute: () => attr } };
+  ent.barLights = [{ intensity: 0 }, { intensity: 0 }];
+  assert.equal(controller.cycleLightbar(), 1);
+  assert.equal(attr.array[0], 1);
+  assert.equal(controller.cycleLightbar(), 2);
+  assert.equal(controller.cycleLightbar(), 3);
+  assert.equal(controller.cycleLightbar(), 4);
+  assert.equal(controller.cycleLightbar(), 0, 'wraps to off');
+  controller.setLightbar(3);
+  let lit = 0, dark = 0;
+  for (let t = 0; t < 1; t += 0.02) {
+    controller.updateCarLights(ent, t);
+    if (ent.barLights[0].intensity > 0 || ent.barLights[1].intensity > 0) lit++; else dark++;
+  }
+  assert.ok(lit > 0 && dark > 0, `the point lights flash with the pattern (${lit} lit, ${dark} dark samples)`);
+  assert.equal(controller.cycleSiren(), 'siren');
+  assert.equal(controller.cycleSiren(), 'siren-wail');
+  assert.equal(controller.cycleSiren(), 'siren-yelp');
+  assert.equal(controller.cycleSiren(), 'siren-phaser');
+  assert.equal(controller.cycleSiren(), 'off');
+  assert.equal(ent.sirenOn, false);
+  controller.setSiren('siren-yelp');
+  assert.equal(ent.sirenOn, true);
 });

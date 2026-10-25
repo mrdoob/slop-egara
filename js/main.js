@@ -4,7 +4,7 @@ import { ssr } from 'three/addons/tsl/display/SSRNode.js';
 import { createPostProcessing } from './post-processing.js';
 import { ClusteredLighting } from 'three/addons/lighting/ClusteredLighting.js';
 import { getLocationLabel, isTypingInField, ROADS, CITY_LANDMARKS, TELEPORT_LOCATIONS, FEATURES } from './city-config.js';
-import { loadTerrain, terrainY } from './terrain.js';
+import { loadTerrain, terrainY, bridgeList } from './terrain.js';
 import { buildCityGrid, groundHeightAt } from './city-grid.js';
 import { buildSurroundings } from './surroundings.js';
 import { buildLandmarks } from './landmarks.js';
@@ -13,6 +13,8 @@ import { buildStreetDetails } from './street-details.js';
 import { createTrafficSystem, createHighwayTraffic } from './traffic.js';
 import { buildRoadPaint } from './road-paint.js';
 import { ThirdPersonControllerManager } from './controllers.js';
+import { VEHICLE_CATALOGUE } from './vehicle-physics.js';
+import { buildParkedBikes } from './parked-bikes.js';
 import { TouchControls } from './touch-controls.js';
 import { GamepadControls } from './gamepad-controls.js';
 import { CameraSystem, CAMERA_PRESETS } from './cameras.js';
@@ -20,6 +22,7 @@ import { LightingSystem } from './lighting.js';
 import { CityMapSystem } from './city-map.js';
 import { setupSceneCulling, updateSceneCulling } from './scene-culling.js';
 import { CityAudioSystem } from './audio-system.js';
+import { SIREN_TUNING } from './audio-synthesis.js';
 
 // js/main.js
 // Main entry point for Slop Terrassa (Terrassa, Vallès Occidental) in Three.js WebGPURenderer & TSL (three.js dev, see index.html)
@@ -104,12 +107,25 @@ async function initApp() {
   buildRoadPaint(scene, trafficSystem.network);
   markInit('roadPaint');
 
-  // 4. Initialize Third-Person Controllers (Person, Car, Cyclist, Helicopter) & Multi-Camera System
-  const controllerManager = new ThirdPersonControllerManager(scene, allColliders);
+  // 4. Initialize Third-Person Controllers (Person, Car, Cyclist, Helicopter) & Multi-Camera System. The player
+  // collides with the buildings and, with FEATURES.propCollisions, with the benches (oriented boxes) and the posts,
+  // bollards, bins & tree trunks (cylinders) the street builders exported
+  const controllerManager = new ThirdPersonControllerManager(scene, FEATURES.propCollisions ? [...allColliders, ...(cityGrid.propBoxes || [])] : allColliders);
+  if (FEATURES.propCollisions) {
+    controllerManager.setPropColliders([...(streetDetails.obstacles || []), ...(cityGrid.obstacles || [])]);
+    console.info(`[controllers] ${controllerManager._propCount} prop colliders, ${(cityGrid.propBoxes || []).length} benches`);
+  }
+  // Bicycles parked at racks the pedestrian can take (F)
+  const parkedBikes = FEATURES.enterExit
+    ? buildParkedBikes(scene, { isClear: (x, z, r) => controllerManager.isClearAt(x, z, r), groundAt: (x, z) => groundHeightAt(x, z) })
+    : null;
+  controllerManager.parkedBikes = parkedBikes;
+  markInit('parkedBikes');
   // Reuse teleport placement so saved players return at rest, close to their last positions.
   try {
     const saved = JSON.parse(localStorage.getItem('terrassa-player-state'));
     if (saved?.version === 1) {
+      if (FEATURES.vehicleGarage && typeof saved.vehicle === 'string') controllerManager.setVehicle(saved.vehicle);
       for (const mode of Object.keys(controllerManager.entities)) {
         const p = saved.entities?.[mode];
         if (!p || ![p.x, p.y, p.z, p.heading].every(Number.isFinite)) continue;
@@ -125,7 +141,8 @@ async function initApp() {
       const entities = Object.fromEntries(Object.entries(controllerManager.entities).map(([mode, entity]) => [mode, {
         x: entity.position.x, y: entity.position.y, z: entity.position.z, heading: entity.heading
       }]));
-      localStorage.setItem('terrassa-player-state', JSON.stringify({ version: 1, activeMode: controllerManager.activeMode, entities }));
+      const vehicle = controllerManager.entities.car.vehicle ? controllerManager.entities.car.vehicle.id : undefined;
+      localStorage.setItem('terrassa-player-state', JSON.stringify({ version: 1, activeMode: controllerManager.activeMode, vehicle, entities }));
     } catch { /* Storage may be disabled or full. */ }
   }
 
@@ -230,6 +247,23 @@ async function initApp() {
   const elCamera = document.getElementById('hud-active-camera');
   const elSpeed = document.getElementById('hud-speed');
   const elSpeedMeter = document.getElementById('hud-speed-meter');
+  const elGear = document.getElementById('hud-gear');
+  const elEmergency = document.getElementById('hud-emergency');
+  // What the driver has switched on: bar mode, siren tone, indicators (the gauge's second line)
+  function renderEmergencyState() {
+    if (!elEmergency) return;
+    const car = controllerManager.entities.car;
+    const parts = [];
+    if (car.lightbar) {
+      parts.push(['Bar off', 'Posició', 'Prioritari', 'Emergència', 'Escombrat'][car.lightMode || 0]);
+      parts.push({ off: 'Siren off', siren: 'Two-tone', 'siren-wail': 'Wail', 'siren-yelp': 'Yelp', 'siren-phaser': 'Phaser' }[car.sirenKind || 'off']);
+    }
+    if (car.turnSignal === 1) parts.push('◀ Indicator'); else if (car.turnSignal === -1) parts.push('Indicator ▶'); else if (car.turnSignal === 2) parts.push('Hazards');
+    elEmergency.textContent = parts.join(' · ');
+    elEmergency.hidden = parts.length === 0;
+  }
+  const elRpm = document.getElementById('hud-rpm');
+  const elRpmBar = document.getElementById('hud-rpm-bar');
   const elAltitude = document.getElementById('hud-altitude');
   const elLocation = document.getElementById('hud-location');
   const elControlsHint = document.getElementById('hud-controls-hint');
@@ -245,13 +279,70 @@ async function initApp() {
 
   // Keyboard guide for each mode: [keys, action]
   const controlHints = {
-    person: [[['W', 'S'], 'Walk'], [['A', 'D'], 'Turn'], [['Shift'], 'Sprint'], [['Space'], 'Jump'], [['Drag'], 'Orbit']],
-    car: [[['W', 'S'], 'Drive / Reverse'], [['A', 'D'], 'Steer'], [['Shift'], 'Boost'], [['B'], 'Horn'], [['Drag'], 'Orbit']],
-    cyclist: [[['W', 'S'], 'Pedal / Brake'], [['A', 'D'], 'Lean & Turn'], [['Shift'], 'Sprint'], [['Drag'], 'Orbit']],
+    person: [[['W', 'S'], 'Walk'], [['A', 'D'], 'Turn'], [['Shift'], 'Sprint'], [['Space'], 'Jump'], ...(FEATURES.enterExit ? [[['F'], 'Get in / Take a bike']] : []), [['Drag'], 'Orbit']],
+    car: FEATURES.carPhysics
+      ? [[['W'], 'Accelerate'], [['S'], 'Brake · hold to reverse'], [['A', 'D'], 'Steer'], [['Shift'], 'Handbrake'], [['Q', 'E'], 'Indicators'], [['X'], 'Hazards'], ...(FEATURES.enterExit ? [[['F'], 'Get out']] : []), ...(FEATURES.vehicleGarage ? [[['G'], 'Change car']] : []), [['L'], 'Light bar'], [['K'], 'Siren'], [['B'], 'Horn']]
+      : [[['W', 'S'], 'Drive / Reverse'], [['A', 'D'], 'Steer'], [['Shift'], 'Boost'], [['Q', 'E'], 'Indicators'], [['X'], 'Hazards'], ...(FEATURES.enterExit ? [[['F'], 'Get out']] : []), [['B'], 'Horn'], [['Drag'], 'Orbit']],
+    cyclist: [[['W', 'S'], 'Pedal / Brake'], [['A', 'D'], 'Lean & Turn'], [['Shift'], 'Sprint'], ...(FEATURES.enterExit ? [[['F'], 'Get off']] : []), [['Drag'], 'Orbit']],
     helicopter: [[['W', 'S'], 'Pitch'], [['A', 'D'], 'Yaw'], [['Space', 'E'], 'Ascend'], [['Q', 'C'], 'Descend'], [['Shift'], 'Boost']]
   };
-  // Boosted top speeds in km/h (controllers.js caps them at 8.2, 36, 19 & 52 m/s): full scale of the speed meter
+  // Boosted top speeds in km/h (controllers.js caps them at 8.2, 36, 19 & 52 m/s): full scale of the speed meter. The
+  // car's comes from its catalogue vehicle when the driving model is on
   const topSpeedKmh = { person: 30, car: 130, cyclist: 70, helicopter: 190 };
+  const carTopKmh = () => {
+    const car = controllerManager.entities.car;
+    return FEATURES.carPhysics && car.vehicle ? car.vehicle.topSpeedKmh : topSpeedKmh.car;
+  };
+
+  // The garage (FEATURES.vehicleGarage): one button per catalogue vehicle, shown while driving
+  const vehiclePicker = document.getElementById('vehicle-picker');
+  const interactBtn = document.getElementById('btn-interact');
+  function renderVehiclePicker() {
+    if (!vehiclePicker) return;
+    const current = controllerManager.entities.car.vehicle ? controllerManager.entities.car.vehicle.id : null;
+    for (const btn of vehiclePicker.querySelectorAll('.vehicle-btn')) btn.classList.toggle('active', btn.dataset.vehicle === current);
+  }
+  if (vehiclePicker && FEATURES.vehicleGarage) {
+    for (const v of VEHICLE_CATALOGUE) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'vehicle-btn';
+      btn.dataset.vehicle = v.id;
+      btn.title = `${v.label} · ${v.powerKW} kW · ${v.mass} kg\n${v.description}`;
+      btn.textContent = v.short || v.label;
+      btn.addEventListener('click', () => selectVehicle(v.id));
+      vehiclePicker.appendChild(btn);
+    }
+  }
+  function selectVehicle(id) {
+    if (!FEATURES.vehicleGarage) return;
+    const vehicle = controllerManager.setVehicle(id);
+    const ent = controllerManager.entities.car;
+    if (elMode && controllerManager.activeMode === 'car') elMode.textContent = ent.label;
+    renderVehiclePicker();
+    renderEmergencyState();
+    savePlayerState();
+    return vehicle;
+  }
+  function cycleVehicle(step = 1) {
+    const ids = VEHICLE_CATALOGUE.map((v) => v.id);
+    const current = controllerManager.entities.car.vehicle ? controllerManager.entities.car.vehicle.id : ids[0];
+    selectVehicle(ids[(ids.indexOf(current) + step + ids.length) % ids.length]);
+  }
+  // F: out of the car / off the bike, or into the vehicle at hand (controllers.js)
+  function interact() {
+    if (!FEATURES.enterExit) return;
+    const mode = controllerManager.activeMode;
+    const result = mode === 'person' ? controllerManager.enterNearby() : controllerManager.exitVehicle();
+    if (result) selectMode(controllerManager.activeMode);
+    return result;
+  }
+  function renderInteractButton(mode) {
+    if (!interactBtn) return;
+    interactBtn.hidden = !FEATURES.enterExit || mode === 'helicopter';
+    interactBtn.textContent = mode === 'person' ? 'Get in' : mode === 'cyclist' ? 'Get off' : 'Get out';
+  }
+  if (interactBtn) interactBtn.addEventListener('click', interact);
 
   function renderControlHints(mode) {
     if (!elControlsHint) return;
@@ -282,7 +373,6 @@ async function initApp() {
 
   function selectMode(mode) {
     controllerManager.setMode(mode);
-    touchControls.setMode(controllerManager.activeMode);
     gamepadControls.reset();
     modeButtons.forEach((btn) => {
       btn.classList.toggle('active', btn.getAttribute('data-mode') === mode);
@@ -292,6 +382,10 @@ async function initApp() {
     const ent = controllerManager.getActiveEntity();
     if (elMode) elMode.textContent = ent.label;
     renderControlHints(mode);
+    if (vehiclePicker) vehiclePicker.hidden = !(FEATURES.vehicleGarage && mode === 'car');
+    renderVehiclePicker();
+    renderInteractButton(mode);
+    touchControls.setMode(controllerManager.activeMode, mode === 'car' && FEATURES.carPhysics ? { boost: 'Handbrake' } : null);
 
     // If currently on a static scenic camera, switch to 3rd-Person Chase so user sees their selected character/vehicle
     const currentCam = cameraSystem.getActivePreset();
@@ -539,6 +633,35 @@ async function initApp() {
       case 'KeyB':
         if (!e.repeat && !e.metaKey && !e.ctrlKey && !e.altKey && !mapSystem.isFullMapOpen) audioSystem.honk(controllerManager.getActiveEntity());
         break;
+      case 'KeyF':
+        if (!e.repeat && !e.metaKey && !e.ctrlKey && !e.altKey && !mapSystem.isFullMapOpen) interact();
+        break;
+      case 'KeyG':
+        if (!e.repeat && !e.metaKey && !e.ctrlKey && !e.altKey && controllerManager.activeMode === 'car') cycleVehicle(e.shiftKey ? -1 : 1);
+        break;
+      case 'KeyL':
+        // the police bar of the player's patrol car: off → posició → prioritari → emergència (Shift: backwards)
+        if (!e.repeat && !e.metaKey && !e.ctrlKey && !e.altKey && controllerManager.activeMode === 'car') {
+          controllerManager.cycleLightbar(e.shiftKey ? -1 : 1);
+          renderEmergencyState();
+        }
+        break;
+      case 'KeyK':
+        // the siren: off → two-tone → wail → yelp → phaser (Shift: backwards)
+        if (!e.repeat && !e.metaKey && !e.ctrlKey && !e.altKey && controllerManager.activeMode === 'car') {
+          controllerManager.cycleSiren(e.shiftKey ? -1 : 1);
+          renderEmergencyState();
+        }
+        break;
+      case 'KeyQ':
+      case 'KeyE':
+      case 'KeyX':
+        // indicators (Q left, E right) and hazards (X), any car
+        if (!e.repeat && !e.metaKey && !e.ctrlKey && !e.altKey && controllerManager.activeMode === 'car') {
+          controllerManager.setTurnSignal(e.code === 'KeyQ' ? 1 : e.code === 'KeyE' ? -1 : 2);
+          renderEmergencyState();
+        }
+        break;
     }
   });
 
@@ -727,6 +850,15 @@ async function initApp() {
           seating: cityBlocks.seating,
           traffic: trafficSystem,
           entities: controllerManager.entities,
+          controllers: controllerManager,
+          parkedBikes,
+          interact,
+          selectVehicle,
+          sirenTuning: SIREN_TUNING, // tune the sirens by ear while playing: __slop.sirenTuning.twoTone.high = 950
+          selectCamera: (id) => selectCamera(id, true),
+          selectMode,
+          cameraSystem,
+          bridges: bridgeList(),
           groundHeightAt,
           terrainY,
           locations: TELEPORT_LOCATIONS,
@@ -764,7 +896,15 @@ async function initApp() {
         elFps.className = currentFps >= 50 ? 'fps-ok' : currentFps >= 30 ? 'fps-warn' : 'fps-bad';
       }
       if (elSpeed) elSpeed.textContent = String(kmh);
-      if (elSpeedMeter) elSpeedMeter.style.transform = `scaleX(${Math.min(1, kmh / (topSpeedKmh[mode] || 130))})`;
+      if (elSpeedMeter) elSpeedMeter.style.transform = `scaleX(${Math.min(1, kmh / (mode === 'car' ? carTopKmh() : topSpeedKmh[mode] || 130))})`;
+      // the driving model's gear & revs (hidden in the other modes by the stylesheet, body[data-mode])
+      if (mode === 'car') renderEmergencyState();
+      if (elGear && mode === 'car' && activeEnt.phys) {
+        const s = activeEnt.phys;
+        elGear.textContent = s.gear < 0 ? 'R' : s.gear === 0 ? 'N' : `D${s.gear}`;
+        if (elRpmBar) elRpmBar.style.transform = `scaleX(${Math.min(1, s.rpm / s.spec.redline)})`;
+        if (elRpm) elRpm.textContent = String(Math.round(s.rpm / 100) * 100);
+      }
       document.body.classList.toggle('is-boosting', controllerManager.keys.boost && kmh > 0);
       if (elAltitude) elAltitude.textContent = altM.toLocaleString('ca-ES');
       // The street corner of the player on the follow cameras, of the camera itself on the scenic ones

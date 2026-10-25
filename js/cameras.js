@@ -276,11 +276,16 @@ class CameraSystem {
         const camZ = entity.position.z - Math.cos(totalYaw) * horizDist;
         desiredPos.set(camX, Math.max(groundHeightAt(camX, camZ) + 0.65, entity.position.y + height), camZ);
 
+        // The look target leads the entity along the CAMERA's yaw, not its heading: orbiting round it (a drag, the
+        // right stick) keeps it in the middle of the frame, as a game's third-person camera does. It used to lead
+        // 5.2 m along the heading, so at 90 degrees of orbit the pedestrian slid to the edge of the picture ("el
+        // personaje pierde el foco"). Vehicles lead further (you want to see the road), the pedestrian barely
         const lookUpBias = entity.type === 'helicopter' ? 0.2 : (entity.type === 'car' ? 0.52 : 1.55);
+        const lead = entity.type === 'person' ? 0.9 : entity.type === 'cyclist' ? 2.6 : 5.2;
         desiredLook.set(
-          entity.position.x + Math.sin(entity.heading) * 5.2,
+          entity.position.x + Math.sin(totalYaw) * lead,
           entity.position.y + entity.cameraTargetOffset.y + lookUpBias,
-          entity.position.z + Math.cos(entity.heading) * 5.2
+          entity.position.z + Math.cos(totalYaw) * lead
         );
         break;
       }

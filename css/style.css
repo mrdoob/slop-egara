@@ -854,6 +854,108 @@ body.hud-minimized .icon-show {
   transition: color 0.25s ease, background-color 0.25s ease;
 }
 
+/* The garage: one small button per catalogue vehicle, over the mode switch while driving */
+.vehicle-picker {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px;
+  padding: 5px;
+  margin-bottom: 6px;
+}
+
+.vehicle-picker[hidden] {
+  display: none;
+}
+
+.vehicle-btn {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 9px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--text-2);
+  transition: color 0.2s ease, background-color 0.2s ease;
+}
+
+.vehicle-btn:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.vehicle-btn.active,
+.vehicle-btn.active:hover {
+  color: var(--taxi-ink);
+  background: var(--taxi);
+}
+
+/* Get in / get out (F) */
+.interact-btn {
+  margin-left: 4px;
+  padding: 0 12px;
+  color: var(--text);
+  background: var(--hover);
+}
+
+.interact-btn[hidden] {
+  display: none;
+}
+
+/* The driver's switches: bar mode, siren tone, indicators */
+.gauge-emergency {
+  margin-top: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #7fd1ff;
+}
+
+.gauge-emergency[hidden] {
+  display: none;
+}
+
+/* Gear & revs beside the speed, only while driving */
+.gauge-gear {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  margin-left: 12px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-2);
+}
+
+body[data-mode="car"] .gauge-gear {
+  display: inline-flex;
+}
+
+.gauge-rpm {
+  display: inline-block;
+  width: 54px;
+  height: 5px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.gauge-rpm > span {
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-origin: left center;
+  transform: scaleX(0);
+  background: linear-gradient(90deg, #7fd1ff 0%, #ffd34d 70%, #ff4d4d 100%);
+  transition: transform 0.2s ease;
+}
+
+.gauge-rpm-value {
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  font-weight: 500;
+  min-width: 34px;
+}
+
 .mode-btn.active kbd {
   color: rgba(23, 20, 10, 0.62);
   background: rgba(23, 20, 10, 0.1);

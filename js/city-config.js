@@ -418,7 +418,20 @@ function isTypingInField(e) {
 const FEATURES = {
   terrain: true, // the real relief (js/terrassa-terrain.bin via js/terrain.js); off, or without the file, the city is flat
   terrainFile: './js/terrassa-terrain.bin', // its cell size (10 m) is the lattice the asphalt deck is drawn on
-  terrainTile: 500 // m: deck tiles, so frustum culling drops the ground behind the camera
+  terrainTile: 500, // m: deck tiles, so frustum culling drops the ground behind the camera
+  // Driving (NEXT_STEPS.md §2.1): the four-wheel driving model of js/vehicle-physics.js for the player's car (engine &
+  // gearbox, one spring per wheel, saturating tyres, gravity on the slopes) instead of the arcade "speed along the heading"
+  carPhysics: true,
+  // The player collides with the street furniture & the trees (lamp posts, signal poles, bollards, bins, benches, trunks),
+  // not only with the buildings
+  propCollisions: true,
+  // A catalogue of selectable cars (taxi, compact, SUV, the two police forces, a hot hatch) with their own dynamics
+  vehicleGarage: true,
+  // Get out of the car or off the bike and walk, get back in, take a parked bicycle from a rack (F)
+  enterExit: true,
+  // Police with states: patrol (no siren, no lights, obeys the signals) and emergency runs; Mossos d'Esquadra beside the
+  // Policia Municipal. Off: every police car runs with its siren on, as in the original
+  emergencyStates: true
 };
 
 const SIGNAL_TIMING = { cycle: 60, avenueAmber: 26, avenueRed: 30, streetAmber: 56, walk: 7 };

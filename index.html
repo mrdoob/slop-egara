@@ -37,7 +37,9 @@
   <link rel="modulepreload" href="./js/road-paint.js" />
   <link rel="modulepreload" href="./js/traffic.js" />
   <link rel="modulepreload" href="./js/pedestrian-routes.js" />
+  <link rel="modulepreload" href="./js/vehicle-physics.js" />
   <link rel="modulepreload" href="./js/controllers.js" />
+  <link rel="modulepreload" href="./js/parked-bikes.js" />
   <link rel="modulepreload" href="./js/touch-controls.js" />
   <link rel="modulepreload" href="./js/gamepad-controls.js" />
   <link rel="modulepreload" href="./js/cameras.js" />
@@ -177,6 +179,8 @@
   <!-- Bottom-Center: Third-Person Mode Switcher & Controls Guide -->
   <footer class="hud hud-bottom-center">
     <div id="hud-controls-hint" class="controls-hint"></div>
+    <!-- The garage: the selectable cars (js/vehicle-physics.js VEHICLE_CATALOGUE), while driving -->
+    <div id="vehicle-picker" class="panel vehicle-picker" role="group" aria-label="Vehicle" hidden></div>
     <nav id="mode-switch" class="panel mode-switch" aria-label="Third-Person Navigation Mode">
       <span class="mode-indicator" aria-hidden="true"></span>
       <button id="mode-person" class="mode-btn" data-mode="person" type="button" title="Person [1]">
@@ -191,6 +195,7 @@
       <button id="mode-helicopter" class="mode-btn" data-mode="helicopter" type="button" title="Helicopter [4]">
         <svg class="icon" aria-hidden="true"><use href="#i-heli"/></svg><span class="mode-label">Fly</span><kbd>4</kbd>
       </button>
+      <button id="btn-interact" class="mode-btn interact-btn" type="button" title="Get in or out [F]" hidden>Get out</button>
     </nav>
   </footer>
 
@@ -202,8 +207,9 @@
           <span id="hud-active-mode" class="gauge-label">Terrassa Taxi</span>
           <span class="gauge-alt"><span class="gauge-alt-label">Alt</span> <span id="hud-altitude">0</span> m</span>
         </div>
-        <div class="gauge-speed"><span id="hud-speed">0</span><span class="gauge-unit">km/h</span></div>
+        <div class="gauge-speed"><span id="hud-speed">0</span><span class="gauge-unit">km/h</span><span class="gauge-gear" aria-label="Gear and engine speed"><span id="hud-gear">D1</span><span class="gauge-rpm" aria-hidden="true"><span id="hud-rpm-bar"></span></span><span id="hud-rpm" class="gauge-rpm-value">800</span></span></div>
         <div class="gauge-meter" aria-hidden="true"><span id="hud-speed-meter"></span></div>
+        <div id="hud-emergency" class="gauge-emergency" hidden></div>
       </div>
       <div id="camera-switch" class="camera-switch">
         <button id="cam-prev" class="icon-btn" type="button" title="Previous camera" aria-label="Previous camera">
