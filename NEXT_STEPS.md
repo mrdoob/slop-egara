@@ -39,12 +39,18 @@ y escalonado; tráfico, peatones, jugador, cámara y audio sobre el suelo. Detal
 **Lo que queda (por orden de impacto).**
 1. **Pasos superiores sin etiqueta `bridge`** (nudos de la C-58, N-150, enlaces de autopista: 612 de las 1.232
    crestas cortas del informe): detectar cruces de calzadas sin nodo común y tratar la superior como tablero
-   (hoy la inferior baja y sube en rampa al 18 %). Riesgo bajo: todo en la herramienta.
+   (hoy la inferior baja y sube en rampa al 18 %). Riesgo bajo: todo en la herramienta. **Es donde están las
+   "crestas a lo largo del asfalto" que ve el propietario** (sesión 4, ronda 5: Rambleta del Pare Alegre / Av. de
+   Joaquim de Sagrera bajo la N-150, Ronda de Ponent en trinchera, Av. de Santa Eulàlia); la auditoría de calles
+   ordinarias lejos de estos nudos no encuentra coronas > 0,3 m. También: **estribo a menos de una celda (10 m) de un
+   paso inferior** (Ctra. de Terrassa sobre la Av. del Vallès): las dos calzadas gemelas quedan 1,2 m desfasadas; o
+   celda de 5 m, o alargar el tablero hasta el estribo real.
 2. **Túneles** (`tunnel=yes`, hoy excluidos del grafo): recuperarlos como pasos inferiores con su propia cota (la
    Rambla bajo la Plaça de Catalunya, la C-58). Requiere que `groundHeightAt` sepa de más de dos niveles o que el
    túnel sea una arista con cota propia como los puentes.
-3. **Pilas, arcos y estribos** de los puentes (hoy un tablero liso con pretiles) y los puentes del Pont de Sant Pere
-   y del Passeig con su forma real (fotos).
+3. ~~Pilas y estribos~~ ✅ (sesión 4: pilas, muros, prolongación de extremos al suelo, `VDR-0036`); quedan **arcos**
+   y la forma real del Pont de Sant Pere y del Passeig (fotos), y, en la herramienta, las **cotas de los nudos de
+   solo-puente del nudo C-58/B-40** (ramales de 15 m con 3–4 m de desnivel que se cruzan a cotas incoherentes).
 4. **Gravedad en pendiente** para el coche y la bici (§2.1.2): hoy solo cabecean y balancean con la superficie.
 5. **Base por instancia** en los materiales de fachada "world-space" de los monumentos (las hileras de ventanas se
    desplazan con la cota; en `buildings.js` ya está resuelto con el atributo `base`).
@@ -124,15 +130,22 @@ cabinas, fuentes, alcantarillas. Todo instanciado y barato.
 
 | Síntoma | Causa comprobada | Acción (apartado) |
 |---|---|---|
-| El coche atraviesa árboles, farolas, bancos, bolardos, semáforos | El jugador solo colisiona con `allColliders` (edificios, monumentos, parapetos de las rieras). Los props de `street-details.js` y `city-grid.js` son `footprints` que ve el tráfico IA y los peatones, pero **no** el jugador | 2.1.1 |
+| ~~El coche atraviesa árboles, farolas, bancos, bolardos, semáforos~~ ✅ (2026-10-25) | Era: el jugador solo colisionaba con `allColliders`. Ahora `street-details.js`/`city-grid.js` exportan `obstacles` (cilindros) y `propBoxes` (bancos) y `controllers.js` los resuelve (`FEATURES.propCollisions`, `VDR-0030`) | 2.1.1 |
 | Semáforos siempre en rojo | Un solo reloj global (`SIGNAL_TIMING`, 60 s, todos los cruces en fase) | 2.3 |
 | Coches acumulados / atascos | Varias causas: (a) los coches aparecen en cualquier arista a < 350 m del jugador elegida al azar, así que las zonas con muchas aristas cortas (casco antiguo) reciben más coches por metro; (b) no hay destino: en cada cruce eligen giro, y en los cruces con prioridad por "vía más ancha" las secundarias esperan sin límite; (c) bloqueos mutuos en la caja del cruce (`boxBusy`) sin detección de interbloqueo; (d) rotondas colapsadas en un nodo; (e) vías de sentido único que desembocan en calles saturadas | 2.4 |
 | Zonas con un montón de peatones y otras vacías | Igual que (a): aparición por arista al azar a < 350 m; nada depende del uso del suelo, de los comercios ni de la hora | 2.6 |
 | El tráfico "se ve raro" | Sin distancia de seguridad dependiente de la velocidad, sin indicadores, giros bruscos, sin velocidad por tipo de vía, sin aparcamientos en calzada | 2.4, 2.5 |
 
-### 2.1 Física y colisiones del coche (sin llegar a simulador)
+### 2.1 Física y colisiones del coche
 
-**2.1.1 Chocar con lo que hay (prioridad 1, bajo riesgo).**
+**Estado (2026-10-25, sesión 4, `HOW_TO_IMPROVE.md` §3 y §5.8, `VDR/0028`–`0033`).** Hecho detrás de `FEATURES`:
+`propCollisions` (postes, semáforos, bolardos, papeleras, troncos como cilindros; bancos como cajas), `carPhysics`
+(modelo de cuatro ruedas de `js/vehicle-physics.js`: muelles independientes, neumáticos saturables, ABS/TCS, freno de
+mano, cambio automático, gravedad en pendiente), `vehicleGarage` (seis vehículos, tecla `G`), `enterExit` (subir y
+bajar con `F`, bicis aparcadas de `js/parked-bikes.js`). Lo que sigue abajo queda como referencia; lo **pendiente** de
+cada apartado se marca con ⚪.
+
+**2.1.1 Chocar con lo que hay — ✅ hecho salvo bordillos y props rompibles.**
 - Unificar colisionadores: `main.js` construye una sola **tabla de colisión** con tres clases: *sólido alto* (edificios,
   monumentos: ya), *sólido bajo* (troncos de árbol ø 0,3–0,6 m, farolas, semáforos, bolardos, papeleras, bancos,
   marquesinas, contenedores, parapetos) y *franqueable* (setos, alcorques). `street-details.js` y `city-grid.js` ya
@@ -141,14 +154,18 @@ cabinas, fuentes, alcantarillas. Todo instanciado y barato.
 - Respuesta física: cilindro (tronco/poste) vs caja del coche → impulso de rebote proporcional a la velocidad y al
   ángulo, el coche pierde velocidad y se desvía; a baja velocidad se detiene sin "pegarse" (deslizar a lo largo del
   obstáculo). Para el peatón y la bici: deslizar.
-- Bordillos: subir la acera a baja velocidad con un pequeño salto y traqueteo; a alta velocidad frenar; el jugador
-  puede conducir por la acera (como en GTA) pero con penalización de velocidad y los peatones apartándose.
-- Props rompibles (opcional, fase 2): bolardos, papeleras y señales caen al ser atropellados (instancia que gira y
+- ⚪ Bordillos: subir la acera a baja velocidad con un pequeño salto y traqueteo; a alta velocidad frenar; el jugador
+  puede conducir por la acera (como en GTA) pero con penalización de velocidad y los peatones apartándose. (El modelo
+  de cuatro ruedas ya reacciona a un escalón bajo una rueda: basta que `getGroundHeight(..., 'car')` devuelva la acera
+  en vez de `roadHeightAt` cuando el coche está sobre una isla.)
+- ⚪ Props rompibles (opcional, fase 2): bolardos, papeleras y señales caen al ser atropellados (instancia que gira y
   se tumba, sin física continua).
-- Coches del tráfico y jugador: hoy el tráfico esquiva al jugador; falta que el jugador choque contra ellos con
-  respuesta (ambos se frenan, el otro pita y se queda parado unos segundos).
+- ⚪ Props que aún no existen como objeto (y por tanto no chocan): marquesinas, señales verticales, terrazas,
+  contenedores, setos.
+- Coches del tráfico y jugador: el tráfico ya empuja y es empujado por el jugador (`collideWithPlayer`); ⚪ falta que el
+  otro pite y se quede parado unos segundos.
 
-**2.1.2 Modelo de conducción "arcade cuidado".**
+**2.1.2 Modelo de conducción — ✅ hecho como simulador ligero (`js/vehicle-physics.js`, `VDR-0028`); pendientes ⚪:**
 - Bicicleta dinámica con masa (1.300 kg), inercia de guiñada y **neumáticos con fuerza lateral saturable**
   (Pacejka simplificada): subviraje natural, derrape al frenar fuerte en curva, freno de mano para girar en
   seco (muy satisfactorio en el casco antiguo).
@@ -156,13 +173,16 @@ cabinas, fuentes, alcantarillas. Todo instanciado y barato.
 - **Pendiente**: el relieve ya existe (1.1) y el coche cabecea y balancea con la superficie que pisa; falta la gravedad longitudinal y lateral (que cueste subir, que se vaya en bajada).
 - Suspensión real en el chasis: 4 muelles-amortiguador que responden al balanceo, al cabeceo y a bordillos;
   transferencia de carga que afecta al agarre.
-- Caja de cambios de 5 marchas para el sonido (hay síntesis de motor) y para la curva de aceleración.
-- Marcha atrás con la cámara girada, giro del volante animado, luces de freno y marcha atrás (ya hay estado de luces).
-- Cámara: retardo según aceleración lateral, FOV con la velocidad, vibración al ir por adoquines (la Plaça Vella
-  y las calles peatonales con `surface=sett|cobblestone` de OSM, ya descargado en `osm_roads.json` pero no usado).
-- Daño visual acumulativo opcional (abolladuras por decal).
-- Conmutador `FEATURES.carPhysics`; pruebas numéricas en `tests/controllers.test.cjs` (frenada 50→0 km/h en
-  < 20 m; aceleración lateral máxima 1,1 g; no atraviesa un poste a 60 km/h).
+- Caja de cambios automática de 6 marchas (hecha para la curva de aceleración y el HUD); ⚪ que el **sonido del motor**
+  siga las rpm y la marcha del modelo (`audio-sources.js` aún deriva la carga de las teclas) y chirrido de neumáticos
+  desde `state.skid`.
+- ⚪ Marcha atrás con la cámara girada, luz de marcha atrás (hay hueco en `carState`), volante animado en la vista POV.
+- ⚪ Cámara: retardo según aceleración lateral, FOV con la velocidad, vibración al ir por adoquines (la Plaça Vella
+  y las calles peatonales con `surface=sett|cobblestone` de OSM, ya descargado en `osm_roads.json` pero no usado) y
+  **agarre por superficie** (`env.grip` ya existe en el modelo: adoquín 0,85, mojado 0,6).
+- ⚪ Daño visual acumulativo opcional (abolladuras por decal).
+- Conmutador `FEATURES.carPhysics` ✅; pruebas numéricas en `tests/vehicle-physics.test.cjs` (frenada 50→0 km/h en
+  8,7–10,7 m; ~0,7 g en curva y saturación cerca de 1 g; poste a 50 km/h en `tests/controllers.test.cjs`).
 
 **2.1.3 Bicicleta y peatón.** Inclinación real en curva con límite de agarre, pedaleo con cadencia, caída si
 se gira demasiado rápido (reinicio suave). Peatón: escaleras y rampas cuando haya relieve, empujar y esquivar.
@@ -245,8 +265,16 @@ prueba de humo de 5 minutos simulados sin interbloqueos en el casco antiguo.
 
 ### 2.5 Policía: Mossos y Policia Municipal, con criterio
 
-**Hoy.** 1 de cada 60 coches es policía (librea Policia Municipal), **siempre con sirena** (el audio escribe una
-fuente de sirena para todo coche con `isPolice` a menos de 200 m) y con luces fijas.
+**Hecho (2026-10-25, `FEATURES.emergencyStates`, `VDR-0031`).** Dos cuerpos alternos (Policia Municipal berlina,
+Mossos d'Esquadra SUV con librea propia aproximada), estado de **patrulla** por defecto (sin luces ni sirena, respeta
+semáforos) y **emergencias** solo a petición (`startEmergency()`; el propietario no quiere que arranquen solas) con
+luces, sirena y prioridad. Quedan ⚪: la reacción del tráfico (apartarse), el estado "parado con luces", las
+ambulancias del SEM y Bombers, afinar las libreas (ya repintadas con fotos y texto real; faltan escudos, el rotulado
+de las lunas, luces de calandra; un loft de monovolumen/SUV compacto para el Prius+ y el Kuga), que el tráfico **se
+aparte** del coche del jugador con la sirena puesta, grabaciones reales para afinar los cuatro tonos de sirena, y la
+persecución opcional.
+
+**Antes.** 1 de cada 60 coches era policía (librea Policia Municipal), **siempre con sirena** y con luces fijas.
 
 **Propuesta.**
 1. Dos cuerpos: **Policia Municipal de Terrassa** (blanco con banda ajedrezada azul/amarilla, cerca del Centre y en
@@ -351,12 +379,12 @@ ya reserva su recinto.
 
 | # | Mejora | Impacto | Esfuerzo | Riesgo | Depende de |
 |---|---|---|---|---|---|
-| 1 | Colisiones con árboles, farolas y props; respuesta de choque (2.1.1) | Alto | Bajo | Bajo | — |
+| 1 | ~~Colisiones con árboles, farolas y props; respuesta de choque (2.1.1)~~ ✅ hecho (quedan bordillos y props rompibles) | Alto | Bajo | Bajo | — |
 | 2 | Semáforos con desfase y ciclos por cruce (2.3) | Alto (se nota al minuto) | Bajo | Medio | — |
 | 3 | Aparición equilibrada de coches y peatones por tramo, zona y hora (2.4.1, 2.6) | Alto | Bajo-medio | Bajo | — |
-| 4 | Policía con estados, Mossos, sirena solo en emergencia (2.5) | Alto | Bajo | Bajo | — |
+| 4 | ~~Policía con estados, Mossos, sirena solo en emergencia (2.5)~~ ✅ hecho (queda que el tráfico se aparte, SEM) | Alto | Bajo | Bajo | — |
 | 5 | Seguimiento IDM, interbloqueos, rotondas, velocidades por vía (2.4.3, 2.4.4) | Alto | Medio | Medio | — |
-| 6 | Física de conducción arcade cuidada (2.1.2) | Alto | Medio | Medio | — |
+| 6 | ~~Física de conducción (2.1.2)~~ ✅ hecha como simulador ligero; quedan sonido por rpm, agarre por superficie, bordillos | Alto | Medio | Medio | — |
 | 7 | Pasos de cebra pintados y peatones cruzando por ellos (1.9) | Medio | Bajo | Bajo | — |
 | 8 | Monumentos con fotos: Catedral, Mútua, Masia Freixa, mNACTEC (3) | Alto | Medio | Nulo | fotos |
 | 9 | Tráfico con destinos y rutas; autobuses de TMESA por sus líneas (2.4.2, 2.4.6) | Alto | Medio-alto | Medio | paradas OSM |
@@ -367,7 +395,8 @@ ya reserva su recinto.
 | 14 | Reloj continuo, clima, aparcamientos en calzada, mobiliario terrassenc (2.8, 2.2, 1.10) | Medio | Variable | Bajo | — |
 | 15 | Rendimiento: fusión de volúmenes, streaming de colisionadores (2.9) | Medio | Medio | Medio | — |
 
-Recomendación: el relieve (**10**) ya está; ahora **1 + 2 + 3 + 4** en una sesión (colisiones, semáforos,
-aparición equilibrada, policía: todo en `controllers.js`/`traffic.js`/`road-network.js`/`street-details.js`, bajo
-riesgo y muy perceptible), luego **5 + 6** (comportamiento de los coches y física, ya con gravedad en pendiente),
-después **8** con fotos, y en paralelo los flecos del relieve (pasos superiores, túneles) y los datos de **11**.
+Recomendación: el relieve (**10**), las colisiones (**1**), la policía (**4**) y la física (**6**) ya están; ahora
+**2 + 3** (semáforos con desfase, aparición equilibrada) y **5** (seguimiento IDM, interbloqueos, rotondas, velocidades
+por vía), luego los flecos de la sesión 4 (sonido del motor por rpm, bordillos, el tráfico apartándose de las
+emergencias, aparcabicis reales de OSM con permiso de red), después **8** con fotos, y en paralelo los flecos del
+relieve (pasos superiores, túneles) y los datos de **11**.

@@ -98,3 +98,13 @@ Què guanyem, què perdem, què queda pendent. Si alguna part no s'ha pogut veri
 | [0025](0025-totes-les-alcades-es-mesuren-sobre-el-terra-mai-en-y-absoluta.md) | Totes les alçades es mesuren sobre el terra (`groundHeightAt` / `terrainY`), mai com a `y` absoluta | 2026-10-25 | Acceptada |
 | [0026](0026-prova-de-fum-headless-amb-chrome-pel-protocol-devtools.md) | Prova de fum *headless* pròpia (`tools/browser-smoke.mjs`): Chrome pel protocol DevTools, sense dependències, amb `window.__slop` | 2026-10-25 | Acceptada |
 | [0027](0027-elevar-al-relleu-exactament-una-vegada.md) | Tot el que s'escriu a cota de vorada s'eleva al relleu exactament una vegada | 2026-10-25 | Acceptada |
+| [0028](0028-model-de-conduccio-propi-per-roda.md) | Model de conducció propi per roda (`js/vehicle-physics.js`), quatre suspensions independents i sense motor de físiques extern | 2026-10-25 | Acceptada |
+| [0029](0029-cataleg-de-vehicles-per-arquetip-sense-marques.md) | Catàleg de vehicles per arquetip, sense marques (`VEHICLE_CATALOGUE`), amb garatge darrere de `FEATURES.vehicleGarage` | 2026-10-25 | Acceptada |
+| [0030](0030-collisio-amb-mobiliari-des-de-les-matrius-d-instancia.md) | Col·lisió amb el mobiliari urbà i els arbres a partir de les matrius d'instància, no dels punts de col·locació | 2026-10-25 | Acceptada |
+| [0031](0031-policia-amb-estats-i-dos-cossos.md) | Policia amb estats (patrulla / emergència) i dos cossos: Policia Municipal i Mossos d'Esquadra | 2026-10-25 | Acceptada |
+| [0032](0032-una-sola-persona-que-puja-i-baixa-dels-vehicles.md) | Una sola persona que puja i baixa dels vehicles (F) en lloc de quatre avatars simultanis | 2026-10-25 | Acceptada |
+| [0033](0033-bicicletes-aparcades-procedurals.md) | Bicicletes aparcades procedurals a suports d'U invertida (`js/parked-bikes.js`), fins que arribin les dades d'OSM | 2026-10-25 | Acceptada |
+| [0034](0034-les-emergencies-policials-nomes-les-engega-l-usuari.md) | Les emergències policials no arrenquen soles: només les engega l'usuari (`startEmergency()`); modifica VDR-0031 | 2026-10-25 | Acceptada |
+| [0035](0035-llibrees-a-partir-de-fotografies-mai-de-memoria.md) | Les llibrees dels vehicles es pinten a partir de fotografies, mai de memòria (regla; taxi, Policia Municipal i Mossos repintats) | 2026-10-25 | Acceptada |
+| [0036](0036-aproximacions-i-pilas-dels-ponts-al-runtime.md) | Les aproximacions, els murs i les piles dels ponts es completen al runtime (`addRamps`, `buildBridgeGeometry`), no a la dada | 2026-10-25 | Acceptada |
+| [0037](0037-pont-de-llums-per-moduls-sirenes-i-intermitents-sota-control-del-jugador.md) | Pont de llums per mòduls amb modes, sirenes espanyoles i intermitents sota control del jugador (L, K, Q/E/X) | 2026-10-25 | Acceptada |

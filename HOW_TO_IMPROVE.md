@@ -122,7 +122,7 @@ python3 -I tools/catastro-to-json.py tools/data/catastro tools/data/terrassa/cat
 | **Ancho de calzada** (bordillo a bordillo) | 🟡 | `width` si existe (120 vías). Si no: `carriles × ancho de carril + aparcamiento típico`: residencial sentido único ≈ 5,9 m (mediana resultante), residencial doble sentido ≥ 7,5 m, terciaria ≈ 9,5 m, secundaria ≈ 9,2 m, peatonal 4 m. Tabla `LANE`/`EXTRA` en `geo-roads.mjs` |
 | Ancho de acera | 🟠 | Constante `SIDEWALK = 2.4 m` (ver `geo-blocks.mjs`); en el Eixample real varía entre 1,5 y 3 m, en avenidas más |
 | Túneles | — | Excluidos (no se dibujan ni se circula): p. ej. la C-58 soterrada, los pasos inferiores |
-| Puentes y viaductos | 🟡 | Los 140 tramos `bridge=yes` son **tableros** a la cota de sus estribos sobre el relieve (§2.8, §5.7), con aceras y pretiles; sin pilas ni arcos 🟠. Los pasos superiores sin etiqueta (nudos de la C-58, N-150) siguen a una sola cota: la calle que cruza baja y sube en rampa limitada al 18 % 🟠. Túneles excluidos ⚪ |
+| Puentes y viaductos | 🟡 | Los 140 tramos `bridge=yes` son **tableros** a la cota de sus estribos sobre el relieve (§2.8, §5.7), con aceras (arcenes en autopista) y pretiles; desde la sesión 4: **pilas** cada 22 m bajo los vanos altos, **muros de contención** en los tramos bajos y en las rampas, extremos prolongados hasta el suelo (`VDR-0036`), hormigón gris mate. Sin arcos ni la forma real de cada puente 🟠 (el Pont del Passeig es un puente de arcos de hormigón). Los pasos superiores sin etiqueta (nudos de la C-58, N-150) siguen a una sola cota: la calle que cruza baja y sube en rampa limitada al 18 % 🟠; los ramales `bridge` cortos del nudo C-58/B-40 cruzan a cotas incoherentes 🔴 (herramienta). Túneles excluidos ⚪ |
 | Semáforos | ✅ | 309 nodos `highway=traffic_signals` → 236 cruces del grafo señalizados |
 | Pasos de peatones | ✅ | 3.971 pasos (cebra / semáforo / sin marcar) con su posición y la dirección de la calle |
 | Stop / ceda el paso | ✅ | 313 cruces |
@@ -220,7 +220,13 @@ edificios al generarlo. El runtime tiene una sola altura por (x, z) salvo en los
    metros talud abajo, y el anillo de una plaza está troceado en tramos de 4–7 m: el Pont del Passeig pasó de
    11,4/8,8 m a 11,5/11,7 m en sus extremos). Los nodos solo de puente toman la media de sus vecinos. Si bajo un tablero pasa una calzada con menos de
    4,6 m de gálibo (ya 1,5 m por debajo), se **elevan los dos estribos** (máx. 5 m; 19 puentes) y las calles de acceso
-   suben en rampa: nunca se excava la calle de debajo (`raiseBridgeAbutments`).
+   suben en rampa: nunca se excava la calle de debajo (`raiseBridgeAbutments`). Desde la sesión 4 un **estribo con
+   calzadas** toma la cota de sus calles elevada al suelo más alto de las calles a 45 m pero **nunca por encima del otro
+   extremo del tablero** (antes "el suelo más alto a 45 m" sin tope: dejaba 100 tableros en el aire); tras el tallado
+   se **sella** una meseta de 10 m a la cota del nudo (`stampAbutments`) y el tablero toma en el estribo la cota final
+   de la malla (`bridgeDecks`), así calle y tablero coinciden exactamente (0 de 254 estribos desviados). Los extremos
+   de tablero a < 12 m (calzadas gemelas, ramales) se unen a una cota (`joinDeckEnds`, de nuevo tras las elevaciones
+   por gálibo) y el sellado los trata como grupo; el pretil del canal de una riera se interrumpe bajo los tableros.
 2. **Perfil de cada calle** (`roadProfile`): media móvil de 40 m, corrección lineal para clavar los extremos en sus
    cruces, **aplanado de crestas y hoyos cortos** (toda muestra a más de 0,3 m de la cuerda entre sus vecinas a ±15 m
    se pone en la cuerda: una calle no tiene curvas verticales tan cortas) y **limitador de pendiente** (18 % calzadas,
@@ -260,6 +266,236 @@ de Arc/Info. Proyección directa UTM (GRS80) en `tools/lib/utm.mjs`. El marco de
 ---
 
 ## 3. Diario de desarrollo
+
+### 2026-10-25 — Sesión 4 (tarde): conducción tipo simulador, colisiones con el mobiliario, policía con criterio
+
+Petición del propietario: físicas de conducción "mucho más tipo simulador" (y, como en los simuladores, **cada rueda
+amortiguada e independiente**), no atravesar árboles ni farolas, policías sin sirena y coches de los Mossos, elegir
+entre varios coches con su aceleración/giro/potencia, bajar y subir del coche, bicis aparcadas, libreas verosímiles.
+Todo detrás de conmutadores nuevos en `FEATURES` (`city-config.js`): `carPhysics`, `propCollisions`, `vehicleGarage`,
+`enterExit`, `emergencyStates`. Decisiones: `VDR/0028`–`0033`.
+
+1. **Modelo de conducción propio** (`js/vehicle-physics.js`, aritmética pura sin three.js, `VDR-0028`): cuerpo rígido
+   en el plano con **cuatro muelles-amortiguador independientes** (deflexión de cada rueda respecto a su altura
+   estática, barra antibalanceo por eje, carga de cada rueda = precarga + fuerza del muelle, así la transferencia de
+   carga sale sola), cabeceo/balanceo/bote del chasis sobre el plano ajustado a las cuatro alturas de contacto,
+   neumáticos con ángulo de deriva y fórmula mágica de Pacejka (pico = μ·carga), círculo de fricción (rueda bloqueada o
+   patinando pierde agarre lateral), ABS/TCS por vehículo, freno de mano que bloquea el eje trasero, curva de par +
+   cambio automático de 6 marchas con corte de par al cambiar + retención, reparto fwd/rwd/awd, arrastre aerodinámico,
+   rodadura y **gravedad a lo largo y a lo ancho de la pendiente real** (el MDT ya existente), dirección limitada en
+   velocidad angular y con tope decreciente con la velocidad; subpasos a 240 Hz. Medidas con los tests
+   (`tests/vehicle-physics.test.cjs`, 14): taxi 0–100 km/h en 11,6 s, esportiu 5,0 s, SUV 9,5 s; frenada 50→0 en
+   8,7–10,7 m con picado de morro; ~0,7 g en curva con el chasis inclinado hacia fuera; en un 8 % el automático en D
+   aguanta parado, en un 20 % se va hacia atrás; un bordillo bajo un lado inclina el coche y carga ese lado.
+   Convenciones de signos documentadas en la cabecera del módulo (el +x local del coche es su **izquierda**, como el
+   intermitente "left (+x)" del tráfico).
+2. **Integración** (`controllers.js updateCarPhysics`): W acelera, S frena y, mantenida parado, mete marcha atrás
+   (entonces S acelera hacia atrás y W frena), A/D dirección, **Shift = freno de mano** (antes turbo). Las colisiones
+   (edificios, props, tráfico) siguen escribiendo `speed`/`vx`/`vz`/`angularVel` en la entidad y el modelo las absorbe
+   cada fotograma; la respuesta contra pared se reescribió para el modelo (quita la velocidad de aproximación con un
+   pequeño rebote, frota la componente deslizante, gira sobre el contacto) porque la antigua sumaba dos impulsos que el
+   modelo nuevo no amortiguaba (medido: el coche salía a 8 m/s hacia atrás tras chocar a 12 m/s). La raíz del coche
+   sigue el plano del suelo (pendiente), el pivote del chasis va sobre los muelles, **cada rueda sobre su propio
+   suelo**. HUD: marcha (R/N/D1–D6) y cuentarrevoluciones junto a la velocidad; escala del velocímetro = `topSpeedKmh`
+   del vehículo.
+3. **Catálogo de vehículos** (`VEHICLE_CATALOGUE`, `VDR-0029`): taxi (berlina híbrida blanca con franja y luminoso),
+   compacte, SUV familiar (awd, centro de gravedad alto), Policia Municipal (berlina, librea 1), Mossos d'Esquadra
+   (SUV, librea 2), esportiu (221 kW awd sin TCS). Sin marcas reales: arquetipos con cifras del rango de su clase.
+   `applyVehicle()` reconstruye el coche del jugador a partir de la ficha (carrocería, calcas, matrículas, faros,
+   ruedas, puente de luces) y `setVehicle(id)` lo cambia en el sitio; selector `#vehicle-picker` sobre la barra de
+   modos, tecla `G`, guardado en `terrassa-player-state.vehicle`. Las medidas de colisión (`halfW`/`halfL`) salen de la
+   ficha y `traffic.js` las lee de la entidad (antes 0,86 × 2,18 fijos).
+4. **Colisiones con el mobiliario y los árboles** (`VDR-0030`): `street-details.js` y `city-grid.js` exportan al final
+   `obstacles` (cilindros leídos de las **matrices de instancia**: columnas, postes, semáforos, pasos de peatones,
+   pals de placas, bolardos, papeleras; troncos = radio de la especie × escala + 4 cm) y `propBoxes` (bancos como OBB
+   en el formato de los colisionadores de edificios). `controllers.js`: celdas de 48 m, contacto rectángulo orientado
+   vs cilindro para el coche y círculo vs cilindro para peatón y bici, empuje, impulso según velocidad de
+   aproximación, giro sobre el contacto, sacudida de suspensión, chispas, aviso `'prop'` al audio; las papeleras ceden
+   (0,45), los postes no. Teletransportes e `isClearAt()` los respetan. Medido con el arranque: ver cuenta en la
+   consola `[controllers] N prop colliders`.
+5. **Policía con estados y dos cuerpos** (`traffic.js`, `actor-models.js`, `audio-sources.js`, `VDR-0031`): cada coche
+   policial tiene `corps` (1 Policia Municipal, berlina; 2 Mossos, SUV; alternos), `emergency`/`siren`/`priority`. Por
+   defecto **patrulla**: puente apagado, sin sirena, respeta semáforos como cualquiera (las seis reglas de prioridad
+   que leían `isPolice` leen `priority`). Primera versión: una **emergencia** aleatoria cada 2,5–5 min; el propietario
+   la rechazó en la prueba ("no te he pedido que la poli encienda aleatoriamente las luces") y se quitó: ahora nada
+   arranca solo, solo `__slop.traffic.startEmergency()` desde la consola manda a la patrulla más cercana a una
+   emergencia de 40–90 s (`VDR-0034`). Puente de luces con atributo por
+   instancia `barLit` (una malla instanciada por carrocería). Librea Mossos: blanco con banda azul oscura ancha sobre
+   las puertas, línea roja en el borde superior y letras blancas (de memoria, sin foto: 🟠). El coche policial del
+   jugador enciende puente + sirena con `L`.
+6. **Subir y bajar** (`VDR-0032`): `F` baja del coche (por la puerta del conductor, lado izquierdo) o de la bici y
+   deja el vehículo parado; `F` junto al coche o la bici vuelve a subir; junto a una **bici aparcada** la toma del
+   soporte. Mientras se conduce el peatón está oculto (y mudo), mientras se camina el ciclista y el casco están
+   ocultos (la bici queda sola); el peatón ya no pasea solo. Botón "Get in / Get out" en la barra de modos para
+   táctil. Los modos 1–4 siguen funcionando.
+7. **Bicis aparcadas** (`js/parked-bikes.js`, `VDR-0033`): soportes de U invertida con dos bicis, sembrados alrededor de
+   las plazas, los puntos de teletransporte (monumentos, estación) y una de cada cuatro barras de bar, solo en islas
+   con acera y libres de edificios y props, barra paralela a la calle y bicis con el morro hacia dentro; malla
+   instanciada con colores por instancia. Procedurales: no hay inventario de aparcabicis descargado (🟠).
+8. Primera ronda de pruebas del propietario (servidor local, Chrome): (a) las emergencias aleatorias de la policía no
+   se habían pedido → quitadas (punto 5); (b) las libreas de Mossos, Policia Municipal y taxi hechas de memoria no
+   valen: han de ser realistas y de los últimos modelos → **con permiso del propietario** se buscaron y descargaron
+   fotos de referencia (Wikimedia Commons, prensa local, nota de Toyota España; fuentes en §5.1) y se **repintaron las
+   tres libreas** en `actor-models.js` (`createLoftedCarMaterial`) y la calca del taxi del jugador (`controllers.js`):
+   el taxi de Terrassa resultó ser blanco liso con "píxels" rojos y escudo, no la franja diagonal inventada; la
+   Policia Municipal lleva las puertas azules con rombos y franja fluorescente; los Mossos el capó azul marino, la
+   banda con cortes blancos y rojos y el ajedrezado rojo/blanco. Regla nueva: ninguna librea de memoria (`VDR-0035`);
+   (c) **tras meter marcha atrás no se podía volver a D**: en R los pedales se intercambian (S acelera, W
+   frena) y el modelo exigía acelerador para volver a D, pero W era freno; ahora, parado y con solo W pulsada, W pide D
+   y arranca hacia delante (`updateCarPhysics`, test nuevo en `tests/controllers.test.cjs`).
+9. Segunda ronda del propietario: letras "a veces cortadas o giradas como en un espejo", los Mossos aún lejos de la
+   foto, y "todos los puentes de autopistas y de la Mútua son horribles: color, mal conectados". Con su autorización se
+   ejecutó por fin la **prueba de humo headless** (`tools/browser-smoke.mjs`, ahora con `--teleport`/`--eval`/`--shot`
+   en orden y `__slop.selectCamera/selectMode/bridges`) para verlo: (a) las letras salían en espejo en los dos lados y
+   en el capó: la convención de lectura estaba al revés (de pie en el lado izquierdo del coche, +x local, el morro
+   queda a la **izquierda** del observador); corregido y comprobado en captura; (b) el ajedrezado de los Mossos quedaba
+   bajo la moldura negra del SUV (`cladding` 0,5 m): ahora se apila sobre la zona pintada (ajedrezado, texto, banda);
+   (c) **puentes**: medidos con Node sobre la tabla real, 81 de los 280 extremos de tablero quedaban a más de 0,3 m del
+   terreno en su nudo (algunos a 5–12 m: nudos de viaducto partidos en varios tramos, o estribos sobre la zanja de la
+   calle que cruza por debajo). Arreglos en el runtime (`VDR-0036`): primero, **todo extremo en un nudo con calles
+   (estribo) se pone a la cota de la calle** (`terrain.js fitAbutments`: 100 de los 254 estribos estaban a más de 0,3 m,
+   el Pont del Passeig 1,4 m por encima del Passeig; se aceptan desvíos hasta 2,5 m); solo los 14 restantes (calle
+   excavada bajo el mismo extremo, 2,6–7,4 m) se **prolongan en horizontal hasta donde el suelo vuelve a subir** o bajan
+   en **rampa del 9 %** (`addRamps`, 13 prolongaciones; `deckY` lineal a trozos por vértice). La primera versión
+   prolongaba también los estribos desviados 1–2 m y alargó los pretiles del Pont del Passeig 36 m calle adentro: el
+   propietario lo vio y se corrigió el mismo día;
+   `city-grid.js buildBridgeGeometry` dibuja **muros de contención** donde el tablero va a menos de 3 m del suelo,
+   **pilas** rectangulares cada 22 m bajo los vanos altos, un muro de estribo donde aún cuelga un extremo, arcenes de
+   hormigón en vez de aceras en autopista (`cls` 1), y el hormigón pasa de 0x9c9990 (casi blanco al sol) a 0x7e7b76
+   con pretiles 0x8c8983. Comprobado en capturas: Pont del Passeig, Av. del Vallès sobre la Ctra. de Terrassa, N-150,
+   C-58. ⚪ Queda feo el **nudo de la C-58/B-40**: tramos `bridge` cortos con 3–4 m de desnivel en 15 m y ramales que
+   se cruzan a cotas incoherentes; eso hay que arreglarlo en la herramienta (`geo-terrain.mjs`, cotas de nudos de
+   solo-puente). (d) **Peatones que desaparecían al acercarse**: `renderPed` los recortaba con el frustum a y = 1
+   absoluto, no a su altura real sobre el relieve (lo mismo que ya se había arreglado en los coches con `groundPose`):
+   ahora `visible(..., pedGround(p) + 1)`. (e) **Chispas de colisión demasiado altas**: `lastCollisionSpark.y` era 0,5
+   absoluto (ciudad plana); ahora `pos.y + 0,5` sobre el relieve.
+10. Tercera ronda del propietario sobre el Pont del Passeig: "desniveles y huecos vacíos en sus extremos, no quiero
+   aberraciones". Mirado de cerca con la prueba de humo (ambos extremos desde la calle, desde el parque y por debajo):
+   el tablero tenía la cara de los extremos abierta (se veía el hueco de la losa) y el muro lateral solo llegaba al
+   canto, dejando aire entre el canto y el talud. Dos arreglos: (a) **la herramienta** (`tools/geo-terrain.mjs
+   nodeHeights`): un estribo con calzadas ya no toma "el suelo más alto a 45 m" sino la cota de sus propias calles en
+   el nudo (nunca por debajo del suelo de la calle a 8–10 m, por si OSM acaba el tramo de puente talud abajo); el
+   fichero `js/terrassa-terrain.bin` se **regeneró** con el MDT archivado (estribos desviados > 0,3 m: de 100 a 7, todos
+   enlaces de autopista; `fitAbutments` del runtime queda como red de seguridad); (b) **la geometría**
+   (`city-grid.js buildBridgeGeometry`): el tablero se remuestrea cada 4 m en anillos que leen el suelo bajo cada
+   borde; donde la losa va a menos de 3 m del suelo los laterales bajan como muros que siguen el terreno anillo a
+   anillo (muros en ala), donde un tramo en tierra pasa a vano se cierra un **frente de estribo** de lado a lado, y
+   los dos extremos llevan una **tapa** del pretil al suelo: ningún tablero enseña ya la losa hueca ni deja aire bajo
+   el canto. El Pont del Passeig arranca a ras de la Plaça del Doctor Robert por el este; por el oeste el tramo
+   `bridge` de OSM acaba 36 m antes del Passeig, 2,2 m más abajo, y la calle entre ambos baja al 6 % (continua, sin
+   hueco; si el Passeig real es llano hasta el puente, la cota del nudo 240 del MDT es la que engaña 🟡).
+11. Cuarta ronda ("¿tú lo has probado?"): el propietario vio **muros en los dos extremos** (atravesables), un hueco a
+   la derecha saliendo hacia Jacquard y el asfalto de otro color. Método corregido: desde aquí cada puente se prueba
+   **circulando con el coche por encima en los dos sentidos** con capturas cada 2 s (`--eval` que teletransporta,
+   `setTouchInput('forward')` y `--shot`), más a pie en los testeros y a mediodía para el color; no solo capturas
+   estáticas desde fuera. Causas y arreglos: (a) los muros eran mi tapa de los extremos levantada hasta el pretil:
+   ahora la losa se tapa hasta la calzada y, aparte, se tapan los testeros de las **aceras** y de los **pretiles**
+   (antes abiertos: el "hueco"); (b) **el asfalto del puente era invisible**: los cuadriláteros de la calzada estaban
+   enrollados en sentido horario y el material del asfalto es de una cara, así que se veía la **losa de hormigón** de
+   debajo (de ahí el color marrón y las aceras "altas"); `quad()` comprueba ahora el sentido con el producto vectorial;
+   a mediodía el asfalto del tablero y el de la calle son idénticos; (c) el **bache** del estribo oeste: la mezcla de
+   perfiles en los cruces de `carveRoads` (pesos 1/(d+2)) promediaba la salida del aparcamiento subterráneo (2,8 m más
+   baja, a 4 m) con el Passeig y hundía el estribo 1,1 m; además `clearUnderBridges` rebajaba la celda de 10 m pegada
+   al nudo (`end` 4 → 12 m). En la herramienta: los estribos con calzadas se elevan a la cota de la calle cercana sin
+   pasar nunca de la cota del otro extremo del tablero (`nodeHeights`, segunda pasada), se **sellan** con una meseta de
+   10 m + 10 m de mezcla a la cota del nudo después del tallado (`stampAbutments`, 3.209 celdas) y la tabla de puentes
+   lee la cota final de la malla en el estribo (`bridgeDecks`): 0 de 254 estribos desviados > 0,3 m; el Pont del
+   Passeig queda a 11,35 → 11,30 m, llano de la Plaça del Doctor Robert al paso de cebra del otro lado. Medido
+   circulando: el coche va de 11,3 a 11,5 m de cota en todo el tramo, sin escalón, en los dos sentidos.
+12. Quinta ronda: "pequeños huecos" a los lados del extremo del hospital, "prueba otros puentes y autopistas", y
+   "crestas a lo largo del asfalto en las afueras". **Huecos laterales**: el sellado del estribo era un círculo de
+   10 m y el terreno caía antes de llegar a las esquinas de un tablero de 19 m; ahora es un **rectángulo** del ancho del
+   tablero + 3 m (de 8 m calle adentro a 12 m bajo el tablero) con 10 m de mezcla (`stampAbutments`); medido 1,5 m
+   fuera del pretil, el suelo queda a 0,4 m del tablero en el extremo. **Auditoría de los 140 puentes** con Node
+   (`scratchpad/audit.cjs`: muescas laterales, escalones de acceso, crestas transversales y longitudinales) y
+   **recorrido en coche** de 12 de ellos en los dos sentidos con un gancho que registra cada colisión
+   (`setCollisionListener`): (a) **Pont de les Arts**: el coche se paraba contra el **pretil del canal de la Riera del
+   Palau**, que seguía bajo el tablero como colisionador; ahora `buildWaterBlock` deja hueco en el pretil donde
+   `bridgeAt` encuentra un tablero; (b) **Carretera de Terrassa sobre la Av. del Vallès** (y Pont de les Arts): las dos
+   calzadas de una **autovía de doble calzada** son dos tableros paralelos a 8–10 m que se solapan: el pretil interior
+   de cada uno quedaba dentro de los carriles del otro (colisión invisible a 33 km/h). `buildBridgeGeometry` detecta
+   con `bridgeAt` un tablero vecino a 1 m del borde y en ese lado suprime acera, pretil y colisionador y lleva el
+   asfalto hasta el canto: los dos leen como un puente con mediana; (c) en la herramienta, `raiseBridgeAbutments`
+   subía un estribo (gálibo del paso inferior) sin su gemelo: `joinDeckEnds` (extraído de `nodeHeights`) se vuelve a
+   pasar tras las elevaciones con el máximo del grupo; el sellado trata los extremos a < 12 m como un grupo (no se
+   respetan mutuamente como "otras calzadas") y fuerza solo el cruce en sí (de 8 m calle adentro a 2 m bajo el
+   tablero): forzar todo el ancho hasta 12 m bajo el tablero izaba 8–10 m la Avinguda de Joaquim de Sagrera, que pasa
+   bajo la N-150 a 13 m de un estribo. **Residuo honesto**: en la Ctra. de Terrassa los dos tableros gemelos siguen
+   1,2 m desfasados entre sí porque la Av. del Vallès pasa por debajo a 8 m del estribo de uno de ellos y la malla de
+   10 m no puede tener a la vez el estribo y el paso inferior en la misma celda (el coche pasa; se ve el canto de un
+   tablero sobre el otro). **Crestas**: la auditoría no encuentra coronas de asfalto (centro por encima de ambos
+   bordes > 0,25 m) en calles ordinarias lejos de autopistas y puentes salvo 2 de 0,3 m (Carrer del Gall, un vial de
+   Les Carbonelles); los "cresta/valle" reales (1.284 muestras > 0,3 m sobre una cuerda de 30 m) se concentran en los
+   **nudos a dos niveles sin etiqueta de puente** (C-58/N-150/C-16 con la Rambleta del Pare Alegre y la Av. de
+   Joaquim de Sagrera, Ronda de Ponent en trinchera con sus calles transversales, Av. de Santa Eulàlia) y en las
+   calles de ladera con plataformas de edificios (Carrer de l'Avellaner): es el punto 1 de "Lo que queda" del relieve
+   (`NEXT_STEPS.md` §1.1), no un defecto nuevo. Pendiente que el propietario señale un sitio concreto si ve una cresta
+   fuera de esas zonas.
+13. **Cámara del peatón al arrastrar** ("el personaje pierde el foco"): la cámara de seguimiento orbitaba alrededor
+   del personaje pero miraba a un punto 5,2 m por delante de su rumbo, así que a 90° de órbita el peatón se iba al
+   borde del encuadre. Ahora el punto de mira adelanta a lo largo del rumbo de la **cámara** (0,9 m a pie, 2,6 m en
+   bici, 5,2 m en coche): el personaje queda centrado se mire desde donde se mire, como en un juego en tercera
+   persona (`cameras.js`, preset `chase`; comprobado con capturas a 0°, 90° y 180° de órbita).
+14. Sexta ronda: "policia" del capó al revés, sirenas y luces tipo simulador con modos, intermitentes en todos los
+   coches, trasera de los Mossos en blanco. (a) **Capó**: la palabra se leía desde el asiento del conductor; en las
+   fotos (Arona, Altea) se lee **desde delante**: `wordBonnet` da la vuelta a u y v (letras con la parte alta hacia el
+   parabrisas). (b) **Trasera de los Mossos**, con dos fotos más de Wikimedia Commons (SEAT León CME 9347 de espaldas,
+   Ford Kuga de tres cuartos trasero): banda azul marino en el portón entre los pilotos con **"www.mossos.cat"** en
+   blanco (leído desde atrás: `wordRear`), **ajedrezado rojo y blanco** en la parte baja del portón sobre la línea del
+   paragolpes. Siguen sin hacer: el "policia" + senyera de la luna trasera (la luna es parte WINDOW), el "112
+   emergències" de la ventanilla trasera, el número de techo. (c) **Puente de luces por módulos y modos**
+   (`createLightbarMaterial`): la barra lee como 8 módulos LED con junta oscura; `barLit` ya no es 0/1 sino el modo:
+   0 apagado, **1 posició** (todo fijo atenuado), **2 prioritari** (mitades alternas con doble destello, el "pont
+   alternant" clásico), **3 emergència** (pares exteriores e interiores en ráfagas triples más un barrido de punta a
+   punta). El coche del jugador lleva además dos luces puntuales azules bajo el puente que siguen la cadencia
+   (`updateCarLights`); el tráfico en emergencia usa el modo 3. (d) **Sirenas españolas conmutables**
+   (`audio-synthesis.js SIREN_KINDS`): bitonal, wail, **yelp** (barrido a 3,2 Hz) y **phaser** (9 Hz, estrecho);
+   `K` las recorre y `L` recorre los modos de luz, independientes entre sí (la sirena cambia de voz al instante:
+   `audio-system.js` rehace la voz si cambia el tipo). Los Mossos del tráfico usan el wail y la Policia Municipal el
+   bitonal. (e) **Intermitentes** en todos los coches del jugador: `Q` izquierdo, `E` derecho, `X` emergencia
+   (`setTurnSignal`; `carState.y/z` que el material ya pintaba para el tráfico); se cancelan solos tras girar unos 50°
+   con el volante recto. Segunda línea del cuentakilómetros con el estado (modo de luz, sirena, intermitente). Todo
+   comprobado en capturas: capó de frente, trasera, modos 2 y 3, intermitente del taxi.
+15. Séptima ronda: trasera blanca y rombos de la Policia Municipal, sirenas "no españolas", destellos "breves
+   entre sí". (a) **Destellos**: medidos, el modo emergència parpadeaba a 31 Hz (12 subdestellos por ciclo de 2,6 Hz):
+   invisible, leído como un brillo. Patrones rehechos con tiempos que el ojo resuelve y **compartidos** entre el shader
+   y las luces puntuales (`LIGHTBAR_PATTERN`): prioritari a 1 Hz con doble destello de 90 ms por mitad; emergència a
+   1,25 Hz con ráfagas triples de 60 ms encendido / 60 apagado, pares exteriores y luego interiores, más un barrido.
+   Prueba nueva `tests/lightbar.test.cjs` que mide las duraciones (destellos 50–70 ms, pausas, alternancia sin
+   solape). (b) **Policia Municipal**: la foto de La Ciutat (29-1-2024) de los **nueve Ford Kuga** ante el Ajuntament
+   muestra la **imagen corporativa nueva**, no la de los Prius+ de 2019 que estaba pintada: puertas blancas con
+   "policia municipal" en azul, aleta delantera y aleta trasera en **amarillo fluorescente** cerradas por un bloque
+   azul inclinado, **ajedrezado azul/blanco por los estribos** con los extremos en diagonal, capó azul con "policia" en
+   blanco y borde delantero amarillo. Repintado así (`createLoftedCarMaterial`, livery 1). **La trasera no está
+   fotografiada**: lleva el ajedrezado y la banda azul continuando los lados, marcado 🟠 hasta tener una foto de
+   espaldas (pedida al propietario). (c) **Sirenas**: no puedo escucharlas; retocadas con los únicos datos
+   documentados (familia hi-lo europea: 780/980 Hz UK, 440/550 Alemania, 435/580 Francia, 0,5–1,5 s por nota;
+   sirengenerator.com) hacia lo que caracteriza a las españolas: bitonal **más grave y lenta** (590/760 Hz, 0,75 s por
+   nota) con **glissando** de ~60 ms entre notas (filtro paso-bajo sobre la onda de control), timbre de bocina con
+   resonancia a 1,15 kHz; wail 500→1300 Hz en 4 s; yelp 3,3 Hz; phaser 10 Hz. Sigue siendo síntesis aproximada (🟠):
+   con una grabación (.wav/.mp3) del propietario se pueden medir frecuencias y cadencias y ajustar.
+16. Octava ronda: "el patrón de emergència se confunde, se superpone el que va de derecha a izquierda". Cierto: el
+   barrido corría a 1 Hz sobre las ráfagas de 1,25 Hz y, descompasados, el ojo perdía el patrón. El barrido **sale del
+   modo emergència** (que queda limpio: ráfagas triples exteriores → interiores) y pasa a ser el **modo 4 escombrat**
+   (un módulo recorre la barra ida y vuelta en 1,2 s, el "traffic advisor" de una unidad parada). `L` recorre ahora
+   cinco modos. Test de que el escombrat nunca enciende las dos mitades a la vez. Sobre las sirenas: el propietario las
+   sigue oyendo raras y pregunta por el **tritono**; lo documentado (El Economista 2025 sobre el estándar de las
+   ambulancias; sin fuente específica de Mossos ni de policías locales catalanas) sitúa el tritono/hi-lo-yelp como
+   repertorio de las ambulancias y el yelp/wail como el de policía; sin grabación no se añade nada más (🟠, ver §5.1).
+17. Novena ronda: la sirena "suena súper apagada y no realista" y no hay grabaciones. Causa: en la ronda 7 bajé el
+   paso-bajo de la bocina a 3 kHz y el nivel a 0,09; una bocina electrónica real es brillante y áspera. Voz devuelta a
+   brillante (paso-bajo 7 kHz, resonancia a 1,8 kHz +6 dB, nivel 0,16) con el bitonal en 700/930 Hz a 0,8 Hz y
+   glissando de 40 ms. Y, como yo no la oigo y el propietario sí, los parámetros pasan a un objeto **afinable en
+   caliente** desde la consola (`SIREN_TUNING` en `audio-synthesis.js`, expuesto como `__slop.sirenTuning`): notas,
+   cadencia, glissando, brillo, resonancia y nivel del bitonal; extremos del barrido, velocidades de wail/yelp/phaser,
+   brillo y nivel. El acuerdo es que el propietario encuentre los números de oído y se fijen como valores por defecto.
+18. Verificación: `node --test 'tests/**/*.test.*'` → **160 pruebas en verde**; prueba de humo headless sin errores de
+   consola; recorridos en coche con gancho de colisiones: Pont del Passeig, Av. de Béjar, Ctra. de Martorell, Pont de
+   les Arts (ambos sentidos, sin golpes), Ctra. de Rellinars, Av. de l'Abat Marcet, Ctra. de Terrassa (ambos sentidos,
+   solo roza el pretil exterior al cambiar de calzada), N-150, C-16, B-122; testeros y laterales del Passeig a pie y a
+   4 m de altura (133 + 14 de físicas + 7 de controlador
+   nuevas; 3 de tráfico adaptadas a `priority`); `node --check` de todos los módulos tocados. **Pendiente la prueba de
+   humo en el navegador** (`tools/browser-smoke.mjs` carga three.js del CDN: requiere permiso para la petición de red).
 
 ### 2026-10-25 — Sesión 3 (madrugada): relieve
 
@@ -395,8 +631,9 @@ fotos de referencia; (d) polígonos oficiales de barris; (e) más comercios (com
 | 4.1 `city-config.js` | ✅ hecho | Reescrito del todo: marco, suelo (`LAND_RING`), calles (`ROADS`, `STREET_INDEX`, `nearestRoads`), manzanas (`BLOCKS`, `blockAt`), barrios (`DISTRICTS`, `blockProfile`: tipología constructiva por barri, 🟠 tabla manual), parques/usos/rieras/vías/árboles, monumentos (`LANDMARK_SITES`, `MODELLED_LANDMARKS`, `CITY_LANDMARKS`), teletransportes calculados sobre la calle más cercana a cada monumento (`streetSpotNear`), etiqueta de posición ("Carrer de Sant Pere & Carrer de la Rutlla", "Mercat de la Independència · Rambla d'Ègara & Carrer de Volta") |
 | 4.2 `road-network.js` | ✅ hecho | Sin corredores de retícula: todas las calles son aristas "generales" del grafo. Los bordillos se comprueban contra el **polígono real** de cada manzana (`blockAt`), no contra rectángulos. Semáforos: los nodos OSM `highway=traffic_signals` (🟡 236 cruces; los semáforos de media manzana se tratan como pasos). Prioridad en cruces sin semáforo: la vía más ancha / de mayor clase (🟠 OSM `stop`/`give_way` se guardan en `n.stop` pero aún no se usan). Vías mayores: clase primaria/secundaria/autopista o nombre que empieza por Avinguda, Rambla, Passeig, Carretera, Ronda, Autopista, Autovia, Via |
 | 4.3 `pedestrian-routes.js` / `traffic.js` | ✅ parcial | Pasos de peatones en cruces semaforizados en **cualquier ángulo** (a lo largo del eje lateral de cada vía que llega al cruce). Fase peatonal según el grupo de prioridad de la vía que se cruza (`n.sideGroup`). ⚪ Pendiente: usar los 3.971 pasos de cebra reales (`roadGraph.crossings`) para cruces sin semáforo; fases independientes en cruces de 3+ vías (hoy todas las secundarias comparten fase y el cruce se protege con la ocupación de la caja). Vehículos: ver 4.12 |
-| 4.13 Vehículos (`actor-models.js`, `traffic.js`, audio) | ✅ hecho | Ver §5.1: taxis blancos con franja roja y azul, Policia Municipal (banda ajedrezada azul/amarilla, luces solo azules), autobuses de TMESA con letreros L1–L9, matrículas españolas, helicóptero de rescate, sirena bitonal |
-| 4.12 `controllers.js` / `main.js` | ✅ hecho | Aparición en la calle más cercana a la Plaça Vella; taxi blanco con franja roja y azul (🟠 librea aproximada, número de licencia inventado), matrícula española "4821 KTR" (🔴 inventada); km/h y metros en el HUD; estado guardado en `terrassa-player-state` |
+| 4.13 Vehículos (`actor-models.js`, `traffic.js`, audio) | ✅ hecho | Ver §5.1: taxis blancos con franja roja y azul, Policia Municipal (banda ajedrezada azul/amarilla, luces solo azules) y Mossos d'Esquadra (banda azul oscura y línea roja) con **estados patrulla/emergencia** (`FEATURES.emergencyStates`, sesión 4), autobuses de TMESA con letreros L1–L9, matrículas españolas, helicóptero de rescate, sirena bitonal solo en emergencia |
+| 4.12 `controllers.js` / `main.js` | ✅ hecho | Aparición en la calle más cercana a la Plaça Vella; taxi blanco con franja roja y azul (🟠 librea aproximada, número de licencia inventado), matrícula española "4821 KTR" (🔴 inventada); km/h, marcha y rpm en el HUD; estado y vehículo guardados en `terrassa-player-state`; subir/bajar (`F`), garaje (`G`), puente de luces (`L`) |
+| 4.15 `vehicle-physics.js`, `parked-bikes.js` + integración en `controllers.js`, `street-details.js`, `city-grid.js`, `traffic.js`, `main.js` | ✅ hecho (sesión 4, ver §5.8) | `FEATURES.carPhysics` (modelo de cuatro ruedas), `propCollisions` (postes, bolardos, papeleras, bancos, troncos), `vehicleGarage` (seis vehículos), `enterExit` (una persona que sube y baja; bicis aparcadas), `emergencyStates` |
 | 4.4 `city-grid.js` | ✅ hecho (ver §5.6) | Quitar agua, muelles, Central Park, plazas de Times Square, Battery; suelo = caja de detalle; aceras y bordillos genéricos; parques desde OSM; rieras; superficies por uso del suelo |
 | 4.5 `buildings.js` | ✅ hecho (ver §5.4) | Huellas reales extruidas + generador procedural con tipologías de Terrassa; sin escaleras de incendios ni depósitos de agua; terrats con caixa d'escala |
 | 4.6 `landmarks.js` | ✅ hecho (ver §5.5) | Constructor por datos (huella real + altura por tipo) con modelos específicos para los más icónicos |
@@ -417,15 +654,17 @@ fotos de referencia; (d) polígonos oficiales de barris; (e) más comercios (com
 |---|---|---|
 | Sentido de circulación | ✅ | Por la derecha |
 | Matrículas | 🟡 | Formato español real "1234 BCD" (4 dígitos + 3 consonantes sin vocales, Ñ ni Q), fondo blanco, banda azul UE con 12 estrellas y "E". Números pseudoaleatorios deterministas (4 variantes compartidas por todos los coches). Mejora: una variante por coche vía atributo de instancia |
-| Taxis | 🟠 | Blancos con franja diagonal roja y azul en las puertas delanteras y luminoso "TAXI" en el techo. Geometría de la franja, proporciones y colores aproximados (sin referencia fotográfica); número de licencia inventado. Mejora: comprobar la ordenanza municipal del taxi de Terrassa / fotos de la parada de la Rambla d'Ègara y ajustar ángulo, anchura y tonos |
-| Policia Municipal | 🟠 | Coche blanco, banda ajedrezada azul/amarilla en las puertas, letras azules, puente de luces solo azul. Aproximación al diseño real (sin texto "POLICIA MUNICIPAL" ni escudo); no hay Mossos d'Esquadra. Mejora: segunda librea Mossos (blanco/azul oscuro, luces rojas+azules) con otra posición de `carState.w` |
+| Taxis | 🟡 | **Corregido con fotos (sesión 4)**: el taxi de Terrassa es **blanco liso**, con una escalera de pequeños cuadrados rojos ("píxels") arriba en la puerta delantera y abajo en la aleta trasera, el escudo de la ciudad (losange con el castillo y corona mural) y "Terrassa / TAXI nn" en negro en la puerta delantera, luminoso "TAXI" en el techo. La antigua franja diagonal roja y azul era inventada y se ha quitado. Fuentes: foto de flota en taxiterrassa.info (Tele Taxi Ègara, Tesla "TAXI 79" en l'Estació del Nord), MónTerrassa 2019/2021/2022 (fila de taxis en la Rambla, detalle "TAXI 16"). Texto real ("Terrassa" / "TAXI 16") desde un atlas de letras (`liveryTextAtlas`). Aproximado: la forma exacta de la escalera (5 cuadrados de 7 cm en el simulador), el escudo simplificado, número de licencia inventado |
+| Policia Municipal | 🟡 | **Imagen corporativa 2024** (foto de La Ciutat, 29-1-2024: nueve Ford Kuga híbridos ante el Ajuntament): puertas blancas con "policia municipal" en azul, aleta delantera y trasera en amarillo fluorescente con bloque azul inclinado, ajedrezado azul/blanco por los estribos con extremos en diagonal, capó azul con "policia" blanco y borde amarillo, puente azul (apagado en patrulla). (La librea anterior de los Prius+ de 2019, puertas azules con rombos, queda sustituida.) **Trasera 🟠 extrapolada** de los lados (ajedrezado + banda azul): falta una foto de espaldas. La flota real son SUV Kuga: el simulador usa la berlina. Aproximado: sin escudo ni "112", bloques inclinados estimados |
+| Mossos d'Esquadra | 🟡 | **Corregido con fotos (sesión 4)**: la imagen corporativa de 2020 (SEAT Ateca y Arona): blanco; **capó azul marino** con "policia" en blanco y un ajedrezado rojo/blanco en su borde delantero; **banda azul marino bajo las ventanillas** de la aleta delantera a la cola, cortada por **dos bloques blancos inclinados con una franja roja** (pilar B y aleta trasera), "policia" pequeño en blanco sobre la aleta; **"mossos d'esquadra" en azul** a lo largo de las dos puertas; **banda ajedrezada rojo/blanco por los estribos**; puente de luces azul. Fuentes: Wikimedia Commons "Seat Ateca dels Mossos 01-03" y "SEAT Arona - Mossos d'Esquadra"; Cugat Mèdia (5 Ateca, 2025); Ara.cat y El Motor de Girona (2020, descripción de la nueva imagen). Texto real ("mossos d'esquadra" en azul, "policia" en la aleta y en el capó leído desde delante, "www.mossos.cat" en la banda del portón) desde el atlas de letras; **trasera** con banda azul marino y ajedrezado rojo/blanco bajo (fotos: León CME 9347, Kuga). Aproximado: sin el escudo de la Generalitat, sin el "policia" de la luna trasera ni el "112" de la ventanilla, sin el número de techo |
+| Estados de la policía | 🟡 | Patrulla por defecto (sin luces ni sirena, respeta semáforos). Las emergencias no arrancan solas (decisión del propietario): `__slop.traffic.startEmergency()` manda a la patrulla más cercana a una de 40–90 s (luces, sirena, se salta semáforos con cautela). Pendiente: que el tráfico se aparte, estado "parado con luces", ambulancias SEM |
 | Proporción de flota | 🔴 | 1 taxi cada 9 coches y 1 policía cada 60 son decisiones de diseño. Paleta de turismos (blanco/plata/gris mayoritarios) aproximada a la matriculación española |
 | Autobuses TMESA | 🟠 | Carrocería de 12 m de piso bajo (reutiliza la geometría del bus de 40 ft). Librea blanca con banda granate y cinta gris: aproximación de memoria, no la librea oficial. Mejora: fotos de la flota actual (tmesa.cat) para corregir tonos y forma de la banda |
 | Letreros de línea | 🟠/🔴 | L1–L6, L8, L9 son líneas de TMESA; los destinos ("Can Roca · Centre", "Ca n'Anglada", "Sant Llorenç", "Can Palet", "Les Fonts", "Can Jofresa", "Ca n'Aurell", "Hospital") son inventados plausibles. Mejora: lista real de líneas y terminales de tmesa.cat en `BUS_ROUTES` de `traffic.js` |
 | Helicóptero | 🔴 | Librea de rescate rojo/amarillo/blanco inspirada en los helicópteros de Bombers de la Generalitat; no reproduce ninguna aeronave real |
 | Ambulancias SEM | ⚪ | No implementadas |
-| Sirena | 🟡 | Bitonal "hi-lo" ≈660/880 Hz a ~1 Hz (vehículos de emergencia españoles); frecuencias y cadencia aproximadas. La antigua sirena americana sigue disponible como `'siren-wail'` |
-| Luces de emergencia | 🟡 | Solo azules; el patrón de destello es el original con los colores cambiados |
+| Sirena | 🟠 | Cuatro tonos sintetizados, **afinables en caliente** desde la consola (`__slop.sirenTuning`): bitonal 700/930 Hz a 0,8 Hz con glissando de 40 ms, wail 520→1450 Hz a 0,25 Hz, yelp 3,3 Hz, phaser 10 Hz, bocina brillante (paso-bajo 7 kHz). `K` los recorre (independiente de `L`); el tráfico solo en emergencia (Mossos wail, Policia Municipal bitonal). Sin grabación de referencia (el propietario no tiene ninguna) y sin fuente documental catalana: los valores finales los fija el propietario de oído y se consolidan en `SIREN_TUNING`; falta el "air horn" |
+| Luces de emergencia | 🟡 | Solo azules (correcto en España). Puente de **8 módulos** con cuatro modos, por instancia (`barLit`): posició fija; prioritari 1 Hz, doble destello de 90 ms por mitad; emergència 1,25 Hz, ráfagas triples de 60/60 ms exteriores→interiores (sin nada superpuesto); escombrat, un módulo ida y vuelta en 1,2 s. Tiempos medidos por test (`tests/lightbar.test.cjs`), compartidos con las luces puntuales del jugador. Cadencias plausibles de los puentes LED, no medidas sobre ninguno real; sin luces de calandra ni de retrovisor; sin luces traseras de emergencia |
 | Sonido guardado | — | Clave `localStorage` `'terrassa-sound'` (antes `'nyc-sound'`) |
 | Tráfico de autopista | ⚪ | `createHighwayTraffic` se mantiene sin carriles (main.js pasa `[]`); reutilizable para la C-58/B-40 cuando se modelen a su cota |
 
@@ -557,3 +796,16 @@ Pendiente general: todas las alturas 🟠 pueden sustituirse por el modelo 3D de
 | Vehículos y peatones | 🟡 | Cota y cabeceo según la pendiente bajo cada eje, tablero de puente cuando su arista es un puente; el coche del jugador cabecea/balancea con el gradiente y se queda en su nivel al pasar bajo un puente (`hint`); sin gravedad en pendiente aún (§2.1.2) |
 | Cámara y audio | ✅ | Todas las alturas son sobre el suelo (`groundHeightAt`/`terrainY`), no cotas absolutas |
 | Entorno regional | 🟠 | Dentro de la caja, el real; fuera, la cota del borde + montañas procedurales; celdas de 100 m bajo el deck no se dibujan; puede verse un escalón en el límite de la caja |
+
+### 5.8 Conducción, colisiones y simulación (`js/vehicle-physics.js`, `js/controllers.js`, `js/parked-bikes.js`)
+
+| Elemento | Marca | Detalle |
+|---|---|---|
+| Modelo de conducción | 🟡 | Cuatro ruedas con muelle-amortiguador independiente, transferencia de carga, neumáticos Pacejka simplificados con círculo de fricción, ABS/TCS, freno de mano, par + cambio automático, gravedad en pendiente (sesión 4). Las cifras (masa, par, relaciones, μ, rigideces) son **plausibles por clase**, no medidas de ningún coche real; sin inercia de rueda (el patinaje es un estado, no una dinámica), sin Ackermann, sin asfalto mojado (`env.grip` existe pero siempre vale 1) |
+| Vehículos del catálogo | 🟠 | Seis arquetipos sin marca: taxi (berlina híbrida), compacte, SUV familiar, Policia Municipal, Mossos d'Esquadra, esportiu. Carrocerías = los dos lofts existentes (berlina/SUV); un monovolumen, una furgoneta o un híbrido con su silueta real necesitarían lofts nuevos |
+| Controles | ✅ | W acelera, S frena / marcha atrás manteniendo parado, A/D, Shift freno de mano, F subir/bajar, G cambiar coche, L puente de luces, B bocina; mando y táctil heredan (la etiqueta del botón turbo pasa a "Handbrake" en coche) |
+| Colisiones con props | 🟡 | Cilindros para postes, semáforos, bolardos, papeleras y troncos; cajas orientadas para bancos. Marquesinas, señales verticales de tráfico, terrazas de bar, contenedores y setos no existen como props (no hay colisión porque no hay objeto). Sin props rompibles. Sin comprobación de altura respecto a los tableros de puente |
+| Bordillos | ⚪ | El coche sigue usando `roadHeightAt` (nunca "sube" el bordillo visualmente aunque pise la acera); los bordillos no frenan ni sacuden. Pendiente §2.1.1 de `NEXT_STEPS.md` |
+| Subir y bajar | 🟡 | Sin animación de puerta ni de montar; el peatón aparece junto a la puerta izquierda y el ciclista a la izquierda de la bici; la bici tomada no vuelve nunca al soporte |
+| Bicis aparcadas | 🟠 | Soportes de U invertida (el modelo habitual en Terrassa) y bicis **procedurales** alrededor de plazas, monumentos/estación y bares: no hay inventario real (OSM `amenity=bicycle_parking` no está en los datos descargados; pediría permiso de red). Geometría de la bici = la del jugador |
+| Sonido del motor | ⚪ | El audio sigue derivando la carga del motor de las teclas (`driveLoad`), no de las rpm ni la marcha del modelo; sin chirrido de neumáticos (`state.skid` ya se calcula) |

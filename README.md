@@ -34,7 +34,7 @@ npx serve .
 python3 -m http.server 8000
 ```
 
-Tecles: `1`–`4` mode de desplaçament, `W A S D` moure's, `Shift` turbo, `V` canviar de càmera, `M` el plànol sencer de la ciutat (clica on vulguis per teletransportar-t'hi), `H` vista neta, `N` silenci.
+Tecles: `1`–`4` mode de desplaçament, `W A S D` moure's (al cotxe: `W` accelera, `S` frena i, aturat, marxa enrere), `Shift` fre de mà al cotxe i esprint a peu o en bici, `Q` `E` intermitents i `X` emergència, `F` pujar i baixar del cotxe o la bici (o agafar una bici aparcada), `G` canviar de cotxe, `L` els cinc modes del pont de llums i `K` les sirenes del cotxe policial, `B` botzina, `V` canviar de càmera, `M` el plànol sencer de la ciutat (clica on vulguis per teletransportar-t'hi), `H` vista neta, `N` silenci.
 
 ## Tests
 
