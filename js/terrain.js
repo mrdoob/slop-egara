@@ -69,9 +69,12 @@ function buildBridges(table) {
     for (let k = 1; k < pts.length; k++) s.push(s[k - 1] + Math.hypot(pts[k].x - pts[k - 1].x, pts[k].z - pts[k - 1].z));
     const len = s[s.length - 1];
     if (len < 1) continue;
-    const half = (width > 3 ? width : 6) * 0.5 + SIDEWALK_W;
+    const cls = l[7] || 0; // 1 motorway: verges instead of sidewalks
+    const w = width > 3 ? width : 6;
+    const half = w * 0.5 + (cls === 1 ? 0.9 : SIDEWALK_W);
     const id = list.length;
-    list.push({ link: b.link, pts, s, half, y0: b.y0, y1: b.y1, len, width: width > 3 ? width : 6 });
+    const ys = s.map((d) => b.y0 + (b.y1 - b.y0) * (d / len));
+    list.push({ link: b.link, nodes: [a, bb], pts, s, ys, half, y0: b.y0, y1: b.y1, len, width: w, cls, ramp0: 0, ramp1: 0 });
     let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
     for (const p of pts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); }
     for (let i = Math.floor((minX - half) / B_CELL); i <= Math.floor((maxX + half) / B_CELL); i++) {
@@ -83,11 +86,122 @@ function buildBridges(table) {
       }
     }
   }
+  fitAbutments(list, rg);
+  addRamps(list);
+  // the grid is bucketed after the ramps, which lengthen the decks
+  grid.clear();
+  list.forEach((b, id) => {
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const p of b.pts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); }
+    for (let i = Math.floor((minX - b.half) / B_CELL); i <= Math.floor((maxX + b.half) / B_CELL); i++) {
+      for (let j = Math.floor((minZ - b.half) / B_CELL); j <= Math.floor((maxZ + b.half) / B_CELL); j++) {
+        const key = i * 100003 + j;
+        let cell = grid.get(key);
+        if (!cell) grid.set(key, (cell = []));
+        cell.push(id);
+      }
+    }
+  });
   return { list, grid };
 }
 
-/** The deck height along bridge `b` at arc length `d` (clamped) */
-const deckY = (b, d) => b.y0 + (b.y1 - b.y0) * Math.max(0, Math.min(1, d / b.len));
+// A deck end at a street junction (an abutment: the node also carries ordinary streets) sits at the street's own
+// height, which is where the cars arrive from: the tool's abutment cotes (the highest ground along the streets within
+// 45 m) overshoot the street by up to 2 m (100 of the 254 abutments by more than 0.3 m; the Pont del Passeig by 1.4 m),
+// which left the deck ending in the air and, worse, had addRamps() carry the parapets 36 m into the Passeig looking
+// for ground at the table's height. Larger gaps (a street carved under the very end) keep the table and get a ramp.
+// The inner vertices are re-interpolated between the two ends
+function fitAbutments(list, rg) {
+  const streetNode = new Set();
+  for (const l of rg.links) if (!l[8]) { streetNode.add(l[0]); streetNode.add(l[1]); }
+  for (const b of list) {
+    const last = b.pts.length - 1;
+    for (const [end, i] of [[0, 0], [1, last]]) {
+      if (!streetNode.has(b.nodes[end])) continue;
+      const p = b.pts[i];
+      const street = terrainY(p.x, p.z);
+      if (Math.abs(b.ys[i] - street) <= 2.5) b.ys[i] = street;
+    }
+    b.y0 = b.ys[0];
+    b.y1 = b.ys[last];
+    for (let k = 1; k < last; k++) b.ys[k] = b.y0 + (b.y1 - b.y0) * (b.s[k] / b.len);
+  }
+}
+
+// A deck end that hangs over the terrain with no other deck carrying on from that junction gets an approach: the
+// terrain tool's abutment heights, the limited-grade approach streets and the cuttings carved under the decks do not
+// always meet (81 of the 280 ends in the ICGC model were off by more than 0.3 m, some by 5 m). The deck is extended back
+// along its own line: level, to where the ground comes back up to the deck (the real abutment lies beyond the dip the
+// crossing street was carved into), or failing that falling at 9 % until it meets the ground. The cars follow it
+// (groundHeightAt → bridgeAt → deckY) and the geometry carries it on walls (city-grid.js buildBridgeGeometry)
+function addRamps(list) {
+  const endHeights = new Map(); // node → [heights of the deck ends there]
+  for (const b of list) {
+    for (const [k, node] of b.nodes.entries()) {
+      const y = k === 0 ? b.ys[0] : b.ys[b.ys.length - 1];
+      if (!endHeights.has(node)) endHeights.set(node, []);
+      endHeights.get(node).push(y);
+    }
+  }
+  const GRADE = 0.09, STEP = 2, LEVEL_MAX = 90, RAMP_MAX = 120;
+  for (const b of list) {
+    for (const end of [0, 1]) {
+      const node = b.nodes[end];
+      const i = end === 0 ? 0 : b.pts.length - 1;
+      const j = end === 0 ? 1 : b.pts.length - 2;
+      const p = b.pts[i], q = b.pts[j];
+      const y = b.ys[i];
+      if (endHeights.get(node).filter((other) => Math.abs(other - y) < 0.8).length > 1) continue; // another deck carries on
+      if (y - terrainY(p.x, p.z) < 0.5) continue; // already on the ground
+      const dx = p.x - q.x, dz = p.z - q.z;
+      const d = Math.hypot(dx, dz) || 1;
+      const ux = dx / d, uz = dz / d;
+      const groundAt = (t) => terrainY(p.x + ux * t, p.z + uz * t);
+      // 1. level: the ground comes back up to the deck within LEVEL_MAX m
+      let L = 0, yEnd = y;
+      for (let t = STEP; t <= LEVEL_MAX; t += STEP) {
+        if (groundAt(t) >= y - 0.4) { L = t; yEnd = y; break; }
+      }
+      // 2. a 9 % ramp down to wherever it meets the ground
+      if (!L) {
+        for (let t = STEP; t <= RAMP_MAX; t += STEP) {
+          const h = y - GRADE * t;
+          if (groundAt(t) >= h - 0.3) { L = t; yEnd = Math.max(h, groundAt(t)); break; }
+        }
+      }
+      // 3. the ground stays far below: a ramp of RAMP_MAX m to it (a long viaduct ramp)
+      if (!L) { L = RAMP_MAX; yEnd = groundAt(L); }
+      const ex = p.x + ux * L, ez = p.z + uz * L;
+      if (end === 0) {
+        b.pts.unshift({ x: ex, z: ez });
+        b.ys.unshift(yEnd);
+        b.ramp0 = L;
+      } else {
+        b.pts.push({ x: ex, z: ez });
+        b.ys.push(yEnd);
+        b.ramp1 = L;
+      }
+    }
+    const s = [0];
+    for (let k = 1; k < b.pts.length; k++) s.push(s[k - 1] + Math.hypot(b.pts[k].x - b.pts[k - 1].x, b.pts[k].z - b.pts[k - 1].z));
+    b.s = s;
+    b.len = s[s.length - 1];
+  }
+}
+
+/** The deck height along bridge `b` at arc length `d` (clamped): piecewise linear through its vertex heights */
+function deckY(b, d) {
+  const s = b.s, ys = b.ys;
+  if (!ys) return b.y0 + (b.y1 - b.y0) * Math.max(0, Math.min(1, d / b.len));
+  if (d <= 0) return ys[0];
+  for (let k = 1; k < s.length; k++) {
+    if (d <= s[k]) {
+      const t = (d - s[k - 1]) / Math.max(1e-6, s[k] - s[k - 1]);
+      return ys[k - 1] + (ys[k] - ys[k - 1]) * t;
+    }
+  }
+  return ys[ys.length - 1];
+}
 
 /**
  * The bridge deck under (x, z), if any: { y, bridge, d (arc length), t (signed offset to the right) }, the nearest

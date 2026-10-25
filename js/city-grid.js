@@ -14,6 +14,7 @@ import {
   FEATURES
 } from './city-config.js';
 import { terrainActive, terrainY, terrainLattice, drapeGeometry, latticeCapGeometry, buildTerrainTiles, bridgeAt, bridgeList, deckY } from './terrain.js';
+import { TREE_SPECIES } from './trees.js';
 import {
   createRoadSurfaceMaterial,
   createSidewalkMaterial,
@@ -396,56 +397,151 @@ function buildKerbGeometry(pts, y0, y1, w = 0.25) {
  * Returns { road (asphalt top), deck (slab sides & underside), walks, parapets, rails: [[ax, az, bx, bz, y]] } or null.
  */
 function buildBridgeGeometry(b) {
-  const n = b.pts.length;
-  if (n < 2 || b.len < 2) return null;
+  if (b.pts.length < 2 || b.len < 2) return null;
   const halfRoad = b.width * 0.5;
   const halfAll = b.half;
-  const THICK = 0.9, WALK = 0.15, PARAPET = 1.1, PT = 0.3;
-  // normals at each polyline point (mitred), like buildRibbonGeometry
-  const N = [];
-  for (let i = 0; i < n; i++) {
-    const p = b.pts[i], a = b.pts[Math.max(0, i - 1)], c = b.pts[Math.min(n - 1, i + 1)];
-    const L = Math.hypot(c.x - a.x, c.z - a.z) || 1;
-    N.push([-(c.z - a.z) / L, (c.x - a.x) / L]);
-  }
-  const Y = b.s.map((d) => deckY(b, d));
-  const road = [], roadN = [], deck = [], deckN = [], walks = [], walksN = [], par = [], parN = [], rails = [];
-  const quad = (pos, nor, p0, p1, p2, p3, nrm) => {
-    // p0 p1 p2 p3 counter-clockwise seen from the normal side
-    for (const v of [p0, p1, p2, p0, p2, p3]) { pos.push(v[0], v[1], v[2]); nor.push(nrm[0], nrm[1], nrm[2]); }
+  const THICK = 0.9, WALK = b.cls === 1 ? 0.05 : 0.15, PARAPET = b.cls === 1 ? 0.85 : 1.05, PT = 0.28;
+  const ground = (x, z) => terrainY(x, z);
+  const EMBANK = 3.0; // a deck less than this over the ground is carried on walls (an embankment), higher ones on piers
+  const PIER_SPACING = 22;
+  const PIECE = 4; // m: the deck is resampled so walls, abutments and piers can follow the ground under it
+
+  // ---- Resample the centre line every PIECE m: position, mitred normal, deck height, ground at both edges --------
+  const pointAt = (d) => {
+    const s = b.s, pts = b.pts;
+    for (let k = 1; k < pts.length; k++) {
+      if (d <= s[k] || k === pts.length - 1) {
+        const a = pts[k - 1], c = pts[k];
+        const seg = Math.max(1e-6, s[k] - s[k - 1]);
+        const t = Math.max(0, Math.min(1, (d - s[k - 1]) / seg));
+        const ux = (c.x - a.x) / seg, uz = (c.z - a.z) / seg;
+        return { x: a.x + (c.x - a.x) * t, z: a.z + (c.z - a.z) * t, ux, uz };
+      }
+    }
+    return null;
   };
-  for (let i = 0; i + 1 < n; i++) {
-    const p = b.pts[i], q = b.pts[i + 1];
-    const [nx0, nz0] = N[i], [nx1, nz1] = N[i + 1];
-    const y0 = Y[i], y1 = Y[i + 1];
-    const P = (o, k, y) => (k === 0 ? [p.x + nx0 * o, y, p.z + nz0 * o] : [q.x + nx1 * o, y, q.z + nz1 * o]);
-    // deck top (carriageway between the walks), underside, and the two sides
-    quad(road, roadN, P(-halfRoad, 0, y0), P(-halfRoad, 1, y1), P(halfRoad, 1, y1), P(halfRoad, 0, y0), [0, 1, 0]);
-    quad(deck, deckN, P(halfAll, 0, y0 - THICK), P(halfAll, 1, y1 - THICK), P(-halfAll, 1, y1 - THICK), P(-halfAll, 0, y0 - THICK), [0, -1, 0]);
+  const count = Math.max(1, Math.ceil(b.len / PIECE));
+  const R = []; // rings
+  for (let k = 0; k <= count; k++) {
+    const d = (b.len * k) / count;
+    const pt = pointAt(d);
+    const y = deckY(b, d);
+    // normal to the right of the direction of travel (as bridgeAt's `t`), mitred at the polyline's own vertices
+    const nx = -pt.uz, nz = pt.ux;
+    const gl = ground(pt.x - nx * halfAll, pt.z - nz * halfAll);
+    const gr = ground(pt.x + nx * halfAll, pt.z + nz * halfAll);
+    const gc = ground(pt.x, pt.z);
+    const gap = y - THICK - Math.min(gl, gr, gc);
+    // another deck alongside (the other carriageway of a dual carriageway: the Carretera de Terrassa, the Pont de les
+    // Arts): no walk, parapet or rail on that side, the roadway runs to the edge (the two decks read as one bridge
+    // with a median instead of each one's inner parapet standing in the other's lanes)
+    const beside = (sgn) => { const o = bridgeAt(pt.x + nx * (halfAll + 1) * sgn, pt.z + nz * (halfAll + 1) * sgn, 0.5); return !!(o && o.bridge !== b); };
+    R.push({ x: pt.x, z: pt.z, ux: pt.ux, uz: pt.uz, nx, nz, y, gl, gr, gc, grounded: gap < EMBANK, d, nbL: beside(-1), nbR: beside(1) });
+  }
+  // the first and last rings are always grounded: a deck ends at a street or at the ground of its ramp
+  R[0].grounded = true;
+  R[R.length - 1].grounded = true;
+
+  const road = [], roadN = [], deck = [], deckN = [], walks = [], walksN = [], par = [], parN = [], piers = [], piersN = [], rails = [];
+  const quad = (pos, nor, p0, p1, p2, p3, nrm) => {
+    // p0 p1 p2 p3 wound counter-clockwise seen from the normal side: checked here from the points themselves (the
+    // carriageway quads were wound clockwise, so the double-sided asphalt was lit as a back face and read a
+    // different colour from the street: the owner's "el color del asfalto sigue siendo distinto")
+    const ax = p1[0] - p0[0], ay = p1[1] - p0[1], az = p1[2] - p0[2];
+    const bx = p2[0] - p0[0], by = p2[1] - p0[1], bz = p2[2] - p0[2];
+    const gx = ay * bz - az * by, gy = az * bx - ax * bz, gz = ax * by - ay * bx;
+    const order = gx * nrm[0] + gy * nrm[1] + gz * nrm[2] >= 0 ? [p0, p1, p2, p0, p2, p3] : [p0, p3, p2, p0, p2, p1];
+    for (const v of order) { pos.push(v[0], v[1], v[2]); nor.push(nrm[0], nrm[1], nrm[2]); }
+  };
+  const P = (r, o, y) => [r.x + r.nx * o, y, r.z + r.nz * o];
+  // the bottom of a side at a ring: into the ground on the grounded stretches, the slab's underside on the spans
+  const bottom = (r, side) => (r.grounded ? Math.min(r.y - THICK, (side > 0 ? r.gr : r.gl) - 0.8) : r.y - THICK);
+
+  for (let i = 0; i + 1 < R.length; i++) {
+    const r0 = R[i], r1 = R[i + 1];
+    const y0 = r0.y, y1 = r1.y;
+    // deck top (carriageway between the walks, or to the edge where another deck runs alongside) and underside
+    const nbL = r0.nbL && r1.nbL, nbR = r0.nbR && r1.nbR;
+    const roadL = nbL ? -halfAll : -halfRoad, roadR = nbR ? halfAll : halfRoad;
+    quad(road, roadN, P(r0, roadL, y0), P(r1, roadL, y1), P(r1, roadR, y1), P(r0, roadR, y0), [0, 1, 0]);
+    quad(deck, deckN, P(r0, halfAll, y0 - THICK), P(r1, halfAll, y1 - THICK), P(r1, -halfAll, y1 - THICK), P(r0, -halfAll, y0 - THICK), [0, -1, 0]);
     for (const sgn of [-1, 1]) {
       const o = sgn * halfAll;
-      const a0 = P(o, 0, y0 - THICK), a1 = P(o, 1, y1 - THICK), a2 = P(o, 1, y1 + WALK), a3 = P(o, 0, y0 + WALK);
-      if (sgn > 0) quad(deck, deckN, a0, a1, a2, a3, [nx0 * sgn, 0, nz0 * sgn]); else quad(deck, deckN, a3, a2, a1, a0, [nx0 * sgn, 0, nz0 * sgn]);
+      // the side: from the walk's top down to the slab's underside, or into the ground where the deck is carried on
+      // walls (the wall's bottom follows the ground ring to ring, so an abutment reads as a wing wall)
+      const a0 = P(r0, o, bottom(r0, sgn)), a1 = P(r1, o, bottom(r1, sgn)), a2 = P(r1, o, y1 + WALK), a3 = P(r0, o, y0 + WALK);
+      if (sgn > 0) quad(deck, deckN, a0, a1, a2, a3, [r0.nx * sgn, 0, r0.nz * sgn]); else quad(deck, deckN, a3, a2, a1, a0, [r0.nx * sgn, 0, r0.nz * sgn]);
+      if (sgn > 0 ? nbR : nbL) continue; // the inner side of a dual carriageway: no walk, parapet or rail
       // raised walk (top + kerb face towards the road)
       const w0 = sgn * halfRoad, w1 = sgn * (halfAll - PT);
       if (sgn > 0) {
-        quad(walks, walksN, P(w0, 0, y0 + WALK), P(w0, 1, y1 + WALK), P(w1, 1, y1 + WALK), P(w1, 0, y0 + WALK), [0, 1, 0]);
-        quad(walks, walksN, P(w0, 0, y0), P(w0, 1, y1), P(w0, 1, y1 + WALK), P(w0, 0, y0 + WALK), [-nx0, 0, -nz0]);
+        quad(walks, walksN, P(r0, w0, y0 + WALK), P(r1, w0, y1 + WALK), P(r1, w1, y1 + WALK), P(r0, w1, y0 + WALK), [0, 1, 0]);
+        quad(walks, walksN, P(r0, w0, y0), P(r1, w0, y1), P(r1, w0, y1 + WALK), P(r0, w0, y0 + WALK), [-r0.nx, 0, -r0.nz]);
       } else {
-        quad(walks, walksN, P(w1, 0, y0 + WALK), P(w1, 1, y1 + WALK), P(w0, 1, y1 + WALK), P(w0, 0, y0 + WALK), [0, 1, 0]);
-        quad(walks, walksN, P(w0, 0, y0 + WALK), P(w0, 1, y1 + WALK), P(w0, 1, y1), P(w0, 0, y0), [nx0, 0, nz0]);
+        quad(walks, walksN, P(r0, w1, y0 + WALK), P(r1, w1, y1 + WALK), P(r1, w0, y1 + WALK), P(r0, w0, y0 + WALK), [0, 1, 0]);
+        quad(walks, walksN, P(r0, w0, y0 + WALK), P(r1, w0, y1 + WALK), P(r1, w0, y1), P(r0, w0, y0), [r0.nx, 0, r0.nz]);
       }
       // parapet: a box along the edge
       const e0 = sgn * (halfAll - PT), e1 = sgn * halfAll;
       const top0 = y0 + WALK + PARAPET, top1 = y1 + WALK + PARAPET;
-      // top, inner face (down to the walk) and outer face (down to the walk: the deck's side carries on below it)
-      quad(par, parN, P(e0, 0, top0), P(e0, 1, top1), P(e1, 1, top1), P(e1, 0, top0), [0, 1, 0]);
-      quad(par, parN, P(e0, 0, y0 + WALK), P(e0, 1, y1 + WALK), P(e0, 1, top1), P(e0, 0, top0), [-nx0 * sgn, 0, -nz0 * sgn]);
-      quad(par, parN, P(e1, 0, top0), P(e1, 1, top1), P(e1, 1, y1 + WALK), P(e1, 0, y0 + WALK), [nx0 * sgn, 0, nz0 * sgn]);
-      const r0 = P(sgn * (halfAll - PT * 0.5), 0, 0), r1 = P(sgn * (halfAll - PT * 0.5), 1, 0);
-      rails.push([r0[0], r0[2], r1[0], r1[2], Math.min(y0, y1) + WALK]);
+      quad(par, parN, P(r0, e0, top0), P(r1, e0, top1), P(r1, e1, top1), P(r0, e1, top0), [0, 1, 0]);
+      quad(par, parN, P(r0, e0, y0 + WALK), P(r1, e0, y1 + WALK), P(r1, e0, top1), P(r0, e0, top0), [-r0.nx * sgn, 0, -r0.nz * sgn]);
+      quad(par, parN, P(r0, e1, top0), P(r1, e1, top1), P(r1, e1, y1 + WALK), P(r0, e1, y0 + WALK), [r0.nx * sgn, 0, r0.nz * sgn]);
+      const rr0 = P(r0, sgn * (halfAll - PT * 0.5), 0), rr1 = P(r1, sgn * (halfAll - PT * 0.5), 0);
+      rails.push([rr0[0], rr0[2], rr1[0], rr1[2], Math.min(y0, y1) + WALK]);
+    }
+    // an abutment front wall across the deck where a grounded stretch meets a span: closes the void under the deck
+    if (r0.grounded !== r1.grounded) {
+      const r = r0.grounded ? r0 : r1;
+      const low = Math.min(r.gl, r.gr, r.gc) - 0.8;
+      const facing = r0.grounded ? 1 : -1; // towards the span
+      const fx = r.ux * facing, fz = r.uz * facing;
+      const q0 = P(r, -halfAll, low), q1 = P(r, halfAll, low), q2 = P(r, halfAll, r.y - THICK + 0.02), q3 = P(r, -halfAll, r.y - THICK + 0.02);
+      if (facing > 0) quad(deck, deckN, q0, q1, q2, q3, [fx, 0, fz]); else quad(deck, deckN, q1, q0, q3, q2, [fx, 0, fz]);
     }
   }
+  // end caps: the slab's end faces from the ground up to the carriageway (never higher: the street carries on over
+  // them, a cap up to the parapet was a wall across the road), the two walks' end faces (kerb height) and the
+  // parapets' end faces, so an end never shows a hollow slab, walk or parapet
+  for (const [r, facing] of [[R[0], -1], [R[R.length - 1], 1]]) {
+    const low = Math.min(r.gl, r.gr, r.gc) - 0.8;
+    const fx = r.ux * facing, fz = r.uz * facing;
+    const face = (pos, nor, o0, o1, yb, yt) => {
+      const q0 = P(r, o0, yb), q1 = P(r, o1, yb), q2 = P(r, o1, yt), q3 = P(r, o0, yt);
+      if (facing > 0) quad(pos, nor, q0, q1, q2, q3, [fx, 0, fz]); else quad(pos, nor, q1, q0, q3, q2, [fx, 0, fz]);
+    };
+    face(deck, deckN, -halfAll, halfAll, low, r.y);
+    for (const sgn of [-1, 1]) {
+      if (sgn > 0 ? r.nbR : r.nbL) continue;
+      face(walks, walksN, sgn * halfRoad, sgn * (halfAll - PT), r.y, r.y + WALK);
+      face(par, parN, sgn * (halfAll - PT), sgn * halfAll, r.y, r.y + WALK + PARAPET);
+    }
+  }
+
+  // ---- Piers under the spans: a rectangular concrete column every PIER_SPACING m (never within 5 m of an end or
+  // on a ramp), from below the ground to the slab's underside
+  const box = (cx, cz, ux, uz, halfL, halfW, yBottom, yTop) => {
+    const rx = -uz, rz = ux;
+    const c = (l, w, y) => [cx + ux * l + rx * w, y, cz + uz * l + rz * w];
+    quad(piers, piersN, c(halfL, -halfW, yBottom), c(halfL, halfW, yBottom), c(halfL, halfW, yTop), c(halfL, -halfW, yTop), [ux, 0, uz]);
+    quad(piers, piersN, c(-halfL, halfW, yBottom), c(-halfL, -halfW, yBottom), c(-halfL, -halfW, yTop), c(-halfL, halfW, yTop), [-ux, 0, -uz]);
+    quad(piers, piersN, c(halfL, halfW, yBottom), c(-halfL, halfW, yBottom), c(-halfL, halfW, yTop), c(halfL, halfW, yTop), [rx, 0, rz]);
+    quad(piers, piersN, c(-halfL, -halfW, yBottom), c(halfL, -halfW, yBottom), c(halfL, -halfW, yTop), c(-halfL, -halfW, yTop), [-rx, 0, -rz]);
+  };
+  const from = (b.ramp0 || 0) + 5, to = b.len - (b.ramp1 || 0) - 5;
+  if (to - from > 8) {
+    const n = Math.max(1, Math.round((to - from) / PIER_SPACING));
+    for (let k = 0; k <= n; k++) {
+      const d = from + ((to - from) * k) / n;
+      const pt = pointAt(d);
+      if (!pt) continue;
+      const top = deckY(b, d) - THICK + 0.05;
+      const g = ground(pt.x, pt.z);
+      if (top - g < 1.2) continue; // the walls carry it here
+      box(pt.x, pt.z, pt.ux, pt.uz, 0.7, Math.max(1.0, Math.min(halfRoad * 0.7, 3.0)), g - 0.8, top);
+    }
+  }
+
   const make = (pos, nor) => {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
@@ -455,7 +551,7 @@ function buildBridgeGeometry(b) {
     g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
     return g;
   };
-  return { road: make(road, roadN), deck: make(deck, deckN), walks: make(walks, walksN), parapets: make(par, parN), rails };
+  return { road: make(road, roadN), deck: make(deck, deckN), walks: make(walks, walksN), parapets: make(par, parN), piers: make(piers, piersN), rails };
 }
 
 /** Closed polygon outline -> fence segments, skipping the stretches within `gapR` of any gate point {x, z}. */
@@ -670,7 +766,9 @@ function buildCityGrid(scene) {
   const ballastMat = createGroundNoiseMaterial(0x6a665e, 0x8d887e, 0.9, 0.98);
   const earthMat = createGroundNoiseMaterial(0x6e5e48, 0x8b7b62, 0.4, 0.97); // torrent beds
   const mudMat = createGroundNoiseMaterial(0x7e776b, 0x9b9486, 0.3, 0.95); // concrete channel beds, silted
-  const concreteMat = new THREE.MeshStandardNodeMaterial({ color: 0x9c9990, roughness: 0.9, side: THREE.DoubleSide });
+  // Bridge & channel concrete: a mid grey (the old 0x9c9990 read almost white in the sun), parapets a shade lighter
+  const concreteMat = new THREE.MeshStandardNodeMaterial({ color: 0x7e7b76, roughness: 0.94, side: THREE.DoubleSide });
+  const parapetMat = new THREE.MeshStandardNodeMaterial({ color: 0x8c8983, roughness: 0.9, side: THREE.DoubleSide });
   const railMat = new THREE.MeshStandardNodeMaterial({ color: 0x5a5753, roughness: 0.35, metalness: 0.8 });
   const timberMat = new THREE.MeshStandardNodeMaterial({ color: 0x6e4f33, roughness: 0.8 });
   const ironMat = new THREE.MeshStandardNodeMaterial({ color: 0x23272a, roughness: 0.5, metalness: 0.6 });
@@ -852,8 +950,9 @@ function buildCityGrid(scene) {
       if (!g) continue;
       addGeo(roadMat, g.road, true); // the carriageway: the same asphalt as the streets
       addGeo(concreteMat, g.deck, true);
-      addGeo(sidewalkMat, g.walks, true);
-      addGeo(concreteMat, g.parapets, true);
+      addGeo(b.cls === 1 ? concreteMat : sidewalkMat, g.walks, true); // motorway verges are concrete, not paving
+      addGeo(parapetMat, g.parapets, true);
+      addGeo(concreteMat, g.piers, true);
       for (const [ax, az, bx, bz, y] of g.rails) addWallCollider(ax, az, bx, bz, 1.2, y);
       bridgeCount++;
     }
@@ -1072,11 +1171,25 @@ function buildCityGrid(scene) {
       }, 6);
       alongPolygonEdges(kerbIn, 30, 24, (x, z, ux, uz, inx, inz) => addLamp(x + inx * 0.6, SW_TOP, z + inz * 0.6), 15);
     }
-    // parapet 1 m high on the walk's inner edge
+    // parapet 1 m high on the walk's inner edge; its collider stops where a bridge deck crosses the channel (the car
+    // on the Pont de les Arts was stopped dead by the Riera del Palau's parapet running on under the deck)
     addExtruded(concreteMat, walkIn, SW_TOP, 1.0, [wallIn]);
     for (let i = 0; i < walkIn.length; i++) {
       const a = walkIn[i], c = walkIn[(i + 1) % walkIn.length];
-      addWallCollider(a.x, a.z, c.x, c.z, 1.2, lift((a.x + c.x) * 0.5, (a.z + c.z) * 0.5));
+      const len = Math.hypot(c.x - a.x, c.z - a.z);
+      const n = Math.max(1, Math.ceil(len / 2));
+      let run = null;
+      for (let k = 0; k <= n; k++) {
+        const t = k / n;
+        const x = a.x + (c.x - a.x) * t, z = a.z + (c.z - a.z) * t;
+        const underDeck = relief && bridgeAt(x, z, 1.5) !== null;
+        if (!underDeck && run === null) run = { x, z };
+        if ((underDeck || k === n) && run !== null) {
+          const ex = underDeck ? a.x + (c.x - a.x) * ((k - 1) / n) : x, ez = underDeck ? a.z + (c.z - a.z) * ((k - 1) / n) : z;
+          addWallCollider(run.x, run.z, ex, ez, 1.2, lift((run.x + ex) * 0.5, (run.z + ez) * 0.5));
+          run = null;
+        }
+      }
     }
     // the channel: walls down from the parapet's inner face, the bed
     const segs = [];
@@ -1322,9 +1435,26 @@ function buildCityGrid(scene) {
   scene.add(group);
   console.info(`[cityGrid] ${blockOutlines.length} sidewalk islands, ${openBlocks.length} open islands (${sunkParkBlocks.length} sunk park, ${waterBlocks.length} channel), ${overlays} land-use overlays, ${treeSites.length} park & wood trees, ${lampSpots.length} park lamps, ${benchMatrices.length} benches, wood spacing ${WOOD_SPACING.toFixed(1)} m`);
 
+  // Low solid props for the player's collisions (controllers.js, FEATURES.propCollisions): the park lamps & trees as
+  // cylinders, the benches as oriented boxes in the building colliders' format (VDR-0030)
+  const obstacles = [];
+  for (const [x, , z] of lampSpots) obstacles.push({ x, z, r: 0.1, h: 4.5, kind: 'post' });
+  for (const t of treeSites) {
+    const trunk = (TREE_SPECIES[t.species] && TREE_SPECIES[t.species].trunk ? TREE_SPECIES[t.species].trunk.r : 0.3) * (t.scale || 1);
+    obstacles.push({ x: t.x, z: t.z, r: trunk + 0.04, h: 6, kind: 'tree' });
+  }
+  const propBoxes = benchMatrices.map((m) => {
+    const e = m.elements;
+    const cx = e[12], cz = e[14], y0 = e[13];
+    const cs = e[0], sn = e[8]; // rotation about y: the local x axis is (cos, 0, -sin), the z axis (sin, 0, cos)
+    const hx = 0.95, hz = 0.35;
+    const ex = Math.abs(cs) * hx + Math.abs(sn) * hz, ez = Math.abs(sn) * hx + Math.abs(cs) * hz;
+    return { minX: cx - ex, maxX: cx + ex, minZ: cz - ez, maxZ: cz + ez, minY: y0, maxY: y0 + 0.9, obb: { cx, cz, hx, hz, cs, sn }, kind: 'bench' };
+  });
+
   // The road network bounds the roads with the real block outlines (city-config.js blockAt): no sidewalk rectangles,
   // and no shore highways
-  return { group, sidewalks: [], footprints, highwayLanes: [], colliders };
+  return { group, sidewalks: [], footprints, obstacles, propBoxes, highwayLanes: [], colliders };
 }
 
 /**

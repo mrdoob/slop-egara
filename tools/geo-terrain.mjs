@@ -173,9 +173,13 @@ export function gridSample(grid, heights, x, z) {
  * Keeps the ground at least `gap` m under every bridge deck (away from its first & last `end` m, where it meets the
  * road), so the deck never coincides with the relief and flickers; the ground under a viaduct is the valley anyway
  */
-export function clearUnderBridges(grid, heights, roads, nodeH, { gap = 0.6, end = 4 } = {}) {
+// `end`: no cell within this many metres of a deck's end is lowered: the 10 m cells touching the abutment feed the
+// bilinear sample the street (and the deck end, bridgeDecks) read there; at 4 m the cell 5-10 m along the deck was
+// lowered and the abutment sampled 1.1 m under the street (the Pont del Passeig)
+export function clearUnderBridges(grid, heights, roads, nodeH, { gap = 0.6, end = 12 } = {}) {
   const { x0, z0, cell, w, h } = grid;
   const mask = grid.roadMask;
+  const abut = grid.abutmentMask;
   let lowered = 0;
   for (const road of roads) {
     if (!road.bridge || !Number.isFinite(nodeH[road.a]) || !Number.isFinite(nodeH[road.b])) continue;
@@ -200,6 +204,7 @@ export function clearUnderBridges(grid, heights, roads, nodeH, { gap = 0.6, end 
           const deck = nodeH[road.a] + (nodeH[road.b] - nodeH[road.a]) * (d / L);
           const q = j * w + i;
           if (mask && mask[q]) continue; // a street under the deck keeps its profile: the deck was raised for it
+          if (abut && abut[q]) continue; // an abutment cell (its own or a parallel deck's: the Carretera de Terrassa pair)
           if (heights[q] > deck - gap) { heights[q] = deck - gap; lowered++; }
         }
       }
@@ -253,10 +258,101 @@ export function raiseBridgeAbutments(grid, heights, roads, nodeH, { clearance = 
   return raised;
 }
 
-/** The bridge decks: [{ link, y0, y1 }] (link index into GEO.roadGraph.links, deck heights at its ends, m a.s.l.) */
-export function bridgeDecks(roads, nodeH) {
+/**
+ * The abutments stamped at their junction height: within `plateau` m of a bridge node that carries streets the ground
+ * IS nodeH (blending back over `blend` m). The junction blending of carveRoads averages the profiles of every street
+ * meeting there by closeness, so a ramp leaving the junction downhill (the car-park exit beside the Pont del Passeig,
+ * 2.8 m lower 4 m away) pulled the abutment 1.1 m under the deck's street and left a dip at the bridge's end. A deck
+ * end reads this ground (bridgeDecks), so deck and street meet at the junction height
+ */
+export function stampAbutments(grid, heights, roads, nodeH, { back = 8, ahead = 12, margin = 3, blend = 10 } = {}) {
+  const { x0, z0, cell, w, h } = grid;
+  const streetNode = new Set();
+  const ends = []; // { node, x, z, ux, uz (into the deck), half }
+  for (const r of roads) {
+    if (!r.bridge) { streetNode.add(r.a); streetNode.add(r.b); continue; }
+    const n = r.pts.length;
+    const dir = (p, q) => { const L = Math.hypot(q[0] - p[0], q[1] - p[1]) || 1; return [(q[0] - p[0]) / L, (q[1] - p[1]) / L]; };
+    const half = (r.width > 3 ? r.width : 6) * 0.5 + 2.4;
+    const [ux0, uz0] = dir(r.pts[0], r.pts[1]);
+    const [ux1, uz1] = dir(r.pts[n - 1], r.pts[n - 2]);
+    ends.push({ node: r.a, x: r.pts[0][0], z: r.pts[0][1], ux: ux0, uz: uz0, half });
+    ends.push({ node: r.b, x: r.pts[n - 1][0], z: r.pts[n - 1][1], ux: ux1, uz: uz1, half });
+  }
+  // carriageways near an abutment that do not meet it (a street passing under the deck, a car-park ramp beside it)
+  // keep their own profile: cells within their band are never stamped (the first version lifted the Avinguda de
+  // Joaquim de Sagrera 8 m where it passes 13 m from an N-150 abutment)
+  const carriageways = roads.filter((r) => !r.bridge && r.cls !== 3 && r.cls !== 4);
+  const distToRoad = (r, x, z) => {
+    let best = Infinity;
+    for (let k = 1; k < r.pts.length; k++) {
+      const [ax, az] = r.pts[k - 1], [bx, bz] = r.pts[k];
+      const dx = bx - ax, dz = bz - az, l2 = dx * dx + dz * dz || 1e-9;
+      const t = Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / l2));
+      best = Math.min(best, Math.hypot(x - ax - t * dx, z - az - t * dz));
+    }
+    return best;
+  };
+  const abutMask = grid.abutmentMask || (grid.abutmentMask = new Uint8Array(w * h));
+  let stamped = 0;
+  for (const e of ends) {
+    if (!streetNode.has(e.node) || !Number.isFinite(nodeH[e.node])) continue;
+    const y = nodeH[e.node];
+    // the deck ends within 12 m of this one (the other carriageway of a dual carriageway, a ramp joining) were brought
+    // to this height by nodeHeights: their streets are the same roadway, not "other" carriageways to keep out of (the
+    // Carretera de Terrassa pair: each stamp spared the other's approach and left a 1.2 m step between the two decks)
+    const group = new Set(ends.filter((o) => Math.hypot(o.x - e.x, o.z - e.z) < 12).map((o) => o.node));
+    const others = carriageways.filter((r) => !group.has(r.a) && !group.has(r.b) && distToRoad(r, e.x, e.z) < 60);
+    const keepOut = (x, z) => others.some((r) => distToRoad(r, x, z) < r.width * 0.5 + 2 + cell * 0.5);
+    // a rectangle in the deck's frame: along from -back (into the street) to +ahead (under the deck: more than a cell,
+    // or the node's bilinear sample reads the cleared cells beyond it), across the deck's full width plus the margin,
+    // blending back into the model over `blend` m beyond it. The old circle of 10 m left the ground falling away
+    // beside the corners of a 19 m deck (the Pont del Passeig: "pequeños huecos")
+    const halfW = e.half + margin;
+    const reach = Math.max(back, ahead, halfW) + blend;
+    const i0 = Math.max(0, Math.floor((e.x - reach - x0) / cell)), i1 = Math.min(w - 1, Math.ceil((e.x + reach - x0) / cell));
+    const j0 = Math.max(0, Math.floor((e.z - reach - z0) / cell)), j1 = Math.min(h - 1, Math.ceil((e.z + reach - z0) / cell));
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const dx = x0 + i * cell - e.x, dz = z0 + j * cell - e.z;
+        const along = dx * e.ux + dz * e.uz, across = Math.abs(-dx * e.uz + dz * e.ux);
+        // distance outside the rectangle
+        const dAlong = along < -back ? -back - along : along > ahead ? along - ahead : 0;
+        const dAcross = Math.max(0, across - halfW);
+        const d = Math.hypot(dAlong, dAcross);
+        if (d >= blend) continue;
+        // the junction itself (from `back` m into the street to 2 m under the deck, the deck's width) is always
+        // stamped: the deck end reads the cells round the node (bridgeDecks). Further under the deck, in the margin and
+        // in the blend, other carriageways keep their profile (an underpass: the Avinguda de Joaquim de Sagrera passes
+        // 13 m from an N-150 abutment and was hoisted 8-10 m when the whole footprint was forced)
+        const core = along >= -back && along <= 2 && across <= e.half;
+        if (!core && keepOut(x0 + i * cell, z0 + j * cell)) continue;
+        const wgt = d <= 0 ? 1 : 1 - smooth01(d / blend);
+        const q = j * w + i;
+        heights[q] += (y - heights[q]) * wgt;
+        if (wgt >= 1) abutMask[q] = 1; // clearUnderBridges leaves these alone (a parallel deck's clearing reached them)
+        stamped++;
+      }
+    }
+  }
+  return stamped;
+}
+
+/**
+ * The bridge decks: [{ link, y0, y1 }] (link index into GEO.roadGraph.links, deck heights at its ends, m a.s.l.). At an
+ * abutment (a node that also carries streets) the deck end is read from the FINISHED grid at the node, so it meets
+ * the street exactly as it was finally carved, whatever the passes in between did to it; mid-viaduct nodes keep the
+ * junction height
+ */
+export function bridgeDecks(roads, nodeH, grid = null, heights = null) {
   const out = [];
-  roads.forEach((r, i) => { if (r.bridge && Number.isFinite(nodeH[r.a]) && Number.isFinite(nodeH[r.b])) out.push({ link: i, y0: nodeH[r.a], y1: nodeH[r.b] }); });
+  const streetNode = new Set();
+  for (const r of roads) if (!r.bridge) { streetNode.add(r.a); streetNode.add(r.b); }
+  const endY = (r, node, pt) => (grid && heights && streetNode.has(node) ? gridSample(grid, heights, pt[0], pt[1]) : nodeH[node]);
+  roads.forEach((r, i) => {
+    if (!r.bridge || !Number.isFinite(nodeH[r.a]) || !Number.isFinite(nodeH[r.b])) return;
+    out.push({ link: i, y0: endY(r, r.a, r.pts[0]), y1: endY(r, r.b, r.pts[r.pts.length - 1]) });
+  });
   return out;
 }
 
@@ -400,8 +496,9 @@ function pointAt(pts, s, d) {
 /**
  * One robust height per junction: the median, over the carriageways that meet there, of each one's median height
  * along its first 10 m (paths & service lanes only when no carriageway arrives; bridge links as a last resort, so
- * an abutment reads the bank, not the channel the model keeps under the deck). At a bridge's abutment the highest
- * street wins (the deck lands on the high side).
+ * an abutment reads the bank, not the channel the model keeps under the deck). An abutment where carriageways arrive
+ * is a junction like any other (the deck starts where the street ends); one reached only by paths takes the highest
+ * ground along them.
  */
 export function nodeHeights(grid, heights, roads, nodeCount) {
   // per junction: the median of each arriving street over its first 10 m, by kind
@@ -409,6 +506,7 @@ export function nodeHeights(grid, heights, roads, nodeCount) {
   const minor = Array.from({ length: nodeCount }, () => []); // paths, steps & service lanes: only if nothing else arrives
   const viaBridge = Array.from({ length: nodeCount }, () => []); // bridge links: last resort
   const streetTop = Array.from({ length: nodeCount }, () => []); // highest ground on each street's first 30 m
+  const streetNear = Array.from({ length: nodeCount }, () => []); // the ground 7.5-10 m along each carriageway
   const minorTop = Array.from({ length: nodeCount }, () => []);
   const isBridgeNode = new Uint8Array(nodeCount);
   const median = (arr) => { const a = arr.slice().sort((p, q) => p - q); return a.length ? a[a.length >> 1] : NaN; };
@@ -436,7 +534,7 @@ export function nodeHeights(grid, heights, roads, nodeCount) {
       }
       if (road.bridge) { viaBridge[node].push(m); isBridgeNode[node] = 1; }
       else if (road.cls === 3 || road.cls === 4) minor[node].push(m);
-      else streets[node].push(m);
+      else { streets[node].push(m); streetNear[node].push(Math.max(far[3] ?? m, far[4] ?? m)); }
       // for an abutment: the highest ground along the street's first 30 m (OSM often ends a bridge link a few
       // metres down the bank; the deck is level with the street beyond it)
       (road.cls === 3 || road.cls === 4 ? minorTop : streetTop)[node].push(Math.max(...far));
@@ -473,12 +571,42 @@ export function nodeHeights(grid, heights, roads, nodeCount) {
   const solid = new Uint8Array(nodeCount);
   for (let n = 0; n < nodeCount; n++) {
     const list = streets[n].length ? streets[n] : minor[n];
-    // a bridge lands on the high side of its abutment: the highest ground on the streets within REACH m of it, so
-    // the ramp road down into the valley does not pull the deck down with it
+    // An abutment (a bridge node where streets arrive) takes the streets' own height at the junction, like any
+    // other junction: the deck then starts exactly where the street ends. The earlier rule ("the highest ground on
+    // the streets within REACH m, so the ramp down into the valley does not pull the deck down") overshot the street
+    // by up to 2 m at 100 of the 254 abutments (the Pont del Passeig by 1.4 m: the Plaça del Doctor Robert is higher
+    // than the Passeig), leaving decks hanging in the air and a hump carved into the street to meet them
+    // (HOW_TO_IMPROVE.md §3 sesión 4). The streets' fitted lines through their 10-40 m already ignore the bank an OSM
+    // bridge link sometimes ends on; where no carriageway arrives (a path up the bank), the highest ground along the
+    // paths still wins, as before
     let v = list.length ? median(list) : NaN;
-    if (isBridgeNode[n]) { const top = topBeyond(n); if (Number.isFinite(top)) v = top; else if (minorTop[n].length) v = Math.max(...minorTop[n]); }
+    if (isBridgeNode[n] && !streets[n].length) {
+      const top = topBeyond(n);
+      if (Number.isFinite(top)) v = top; else if (minorTop[n].length) v = Math.max(...minorTop[n]);
+    }
     out[n] = v;
     solid[n] = Number.isFinite(out[n]) ? 1 : 0;
+  }
+  // Abutments with streets, second pass: OSM often ends a bridge link a few metres down the bank, on a 4 m stub of a
+  // square's ring road, so the street line there reads the bank (the Pont del Passeig: 285.7 m at the node, the
+  // Plaça del Doctor Robert at 290.2 m thirty metres on, the far end of the deck at 290.3 m). The abutment is lifted
+  // to the highest ground on the streets within REACH m, but never above the deck's far end (a square well above the
+  // bridge's street must not hoist the deck): the deck comes out level and the stub climbs to it
+  const farEnd = Array.from({ length: nodeCount }, () => -Infinity);
+  for (const road of roads) {
+    if (!road.bridge) continue;
+    if (solid[road.b]) farEnd[road.a] = Math.max(farEnd[road.a], out[road.b]);
+    if (solid[road.a]) farEnd[road.b] = Math.max(farEnd[road.b], out[road.a]);
+  }
+  for (let n = 0; n < nodeCount; n++) {
+    if (!isBridgeNode[n] || !streets[n].length || !solid[n]) continue;
+    let v = Math.max(out[n], ...streetNear[n]);
+    const top = topBeyond(n);
+    if (Number.isFinite(top) && top > v) {
+      const lift = Number.isFinite(farEnd[n]) ? Math.min(top, Math.max(v, farEnd[n])) : (top - v <= 3.5 ? top : v);
+      v = Math.max(v, lift);
+    }
+    out[n] = v;
   }
   // junctions in the middle of a bridge (bridge links only) take the mean of their neighbours along the bridge, so a
   // long bridge split into several links stays a straight deck instead of dipping to the channel at each joint
@@ -497,7 +625,39 @@ export function nodeHeights(grid, heights, roads, nodeCount) {
     if (!changed) break;
   }
   for (let n = 0; n < nodeCount; n++) if (!solid[n]) out[n] = median(viaBridge[n]);
+  const joined = joinDeckEnds(roads, out, nodeCount);
+  if (joined) log(`${joined} pairs of neighbouring deck ends brought to one height`);
   return out;
+}
+
+/**
+ * Deck continuity: OSM splits a viaduct into links that meet at distinct nodes a few metres apart (a ramp joins, a
+ * tag changes, the two carriageways of a dual carriageway end at their own nodes); the ends then came out at different
+ * heights (the N-150 over the Rambleta del Pare Alegre: 1.8 m between two decks 6 m apart; the Carretera de Terrassa:
+ * 0.9 m between the two carriageways after one was lifted for its underpass), a wall the car stopped against. Deck end
+ * nodes within 12 m of each other with less than 3.5 m between them are brought to one height: by default the
+ * street-anchored one's if only one carries streets, else the mean; `mode: 'max'` takes the higher (after
+ * raiseBridgeAbutments, so the clearance it won is kept). Returns the number of pairs joined
+ */
+export function joinDeckEnds(roads, out, nodeCount, { mode = 'mean' } = {}) {
+  const bridgeEnds = [];
+  const hasStreet = new Uint8Array(nodeCount);
+  for (const road of roads) {
+    if (road.bridge) { bridgeEnds.push([road.a, road.pts[0]]); bridgeEnds.push([road.b, road.pts[road.pts.length - 1]]); }
+    else { hasStreet[road.a] = 1; hasStreet[road.b] = 1; }
+  }
+  let joined = 0;
+  for (let i = 0; i < bridgeEnds.length; i++) {
+    for (let j = i + 1; j < bridgeEnds.length; j++) {
+      const [n1, p1] = bridgeEnds[i], [n2, p2] = bridgeEnds[j];
+      if (n1 === n2 || !Number.isFinite(out[n1]) || !Number.isFinite(out[n2])) continue;
+      if (Math.hypot(p1[0] - p2[0], p1[1] - p2[1]) > 12 || Math.abs(out[n1] - out[n2]) > 3.5 || out[n1] === out[n2]) continue;
+      const y = mode === 'max' ? Math.max(out[n1], out[n2])
+        : hasStreet[n1] && !hasStreet[n2] ? out[n1] : hasStreet[n2] && !hasStreet[n1] ? out[n2] : (out[n1] + out[n2]) / 2;
+      out[n1] = y; out[n2] = y; joined++;
+    }
+  }
+  return joined;
 }
 
 /**
@@ -560,6 +720,9 @@ function roadProfile(grid, heights, road, step, smoothM, nodeH) {
  * profile; over the next `blend` m it fades back into the model. Bridges carve their ramp through whatever lies below.
  */
 export function carveRoads(grid, heights, roads, { step = 5, smoothM = 40, apron = 2, blend = 8, nodeH = null, embank = false } = {}) {
+  // (A wider apron for carriageways was tried against the ridges under narrow streets: it made neighbouring terraced
+  // streets fight over cells, 1185 → 1985 short crests. The lattice cell, not the apron, is the limit.)
+  const apronOf = () => apron;
   const { x0, z0, cell, w, h } = grid;
   const target = new Float32Array(w * h).fill(NaN);
   const weight = new Float32Array(w * h);
@@ -569,7 +732,7 @@ export function carveRoads(grid, heights, roads, { step = 5, smoothM = 40, apron
   const ordered = embank ? [...roads.filter((r) => !r.bridge), ...roads.filter((r) => r.bridge)] : roads.filter((r) => !r.bridge);
   for (const road of ordered) {
     const { samples } = roadProfile(grid, heights, road, step, smoothM, nodeH);
-    const half = road.width * 0.5 + apron;
+    const half = road.width * 0.5 + apronOf(road);
     const reach = half + blend;
     for (let k = 1; k < samples.length; k++) {
       const a = samples[k - 1], b = samples[k];
@@ -982,13 +1145,17 @@ export async function build(opts) {
     // (an overpass with no bridge tag, a ramp over a bridge's abutment) the step becomes a limited-grade ramp
     let carved = carveRoads(grid, heights, roads, { nodeH });
     const raised = raiseBridgeAbutments(grid, heights, roads, nodeH);
+    const rejoined = joinDeckEnds(roads, nodeH, nodeH.length, { mode: 'max' }); // a lifted end takes its siblings up with it
+    if (rejoined) log(`${rejoined} pairs of deck ends re-joined after the lifts`);
     const membrane = membraneBlocks(grid, heights, GEO);
     const platforms = flattenBuildings(grid, heights, GEO);
     // the streets again, last: whatever the blocks' membranes & platforms did at their edges, the carriageways keep
     // their own smooth profiles (crossings at different levels become limited ramps here too)
     carved = carveRoads(grid, heights, roads, { nodeH, smoothM: 20 });
+    const stamped = stampAbutments(grid, heights, roads, nodeH);
+    log(`${stamped} cells stamped at the bridge abutments`);
     const lowered = clearUnderBridges(grid, heights, roads, nodeH);
-    bridges = bridgeDecks(roads, nodeH);
+    bridges = bridgeDecks(roads, nodeH, grid, heights);
     log(`${lowered} cells lowered under the bridge decks`);
     log(`streets written into the relief: ${roads.length} links between ${nodeH.length} junction heights, ${carved} cells; ${bridges.length} bridge decks kept over it; ${membrane.blocks} urban blocks spanned from their kerb line (${membrane.cells} cells, ${membrane.skipped} big blocks keep the model); ${platforms.platforms} building platforms (${platforms.cells} cells); ${raised} decks lifted for the streets under them, ${lowered} cells lowered under the decks`);
   }
